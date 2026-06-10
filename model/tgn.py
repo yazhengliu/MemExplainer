@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from collections import defaultdict
 # from .edge_relevance_explainer import EdgeRelevanceExplainer
+from tools.compare_graph_sum_outputs import compare_graph_sum_outputs_from_tgn
 
 from utils.utils import MergeLayer
 from modules.memory import Memory
@@ -151,14 +152,6 @@ class TGN(torch.nn.Module):
         # print('self.memory.messages',type(self.memory.messages))
         memory, last_update,C_message,C_memory,C_message_trace = self.get_updated_memory(list(range(self.n_nodes)),
                                                       self.memory.messages,message_dict,memory_dict,message_trace_dict)
-        print('memory',memory.shape)
-        print('last_update',last_update.shape)
-
-
-
-
-
-
       else:
         memory = self.memory.get_memory(list(range(self.n_nodes)))
         last_update = self.memory.last_update
@@ -189,6 +182,27 @@ class TGN(torch.nn.Module):
     #                                                          n_neighbors=n_neighbors,
     #                                                          time_diffs=time_diffs)
     if self.embedding_module_type=='graph_sum':
+        # compare_graph_sum_outputs_from_tgn(
+        #     tgn=self,
+        #     memory=memory,
+        #     nodes=nodes,
+        #     timestamps=timestamps,
+        #     n_neighbors=n_neighbors,
+        #     atol=1e-6,
+        #     rtol=1e-6,
+        # )
+        #
+        # node_embedding_iter, C_memory_features, \
+        #     C_neighbor_memory_features, \
+        #     temporal_edge_contributions, sample_neighbors, sample_neighbor_edgeidx = \
+        #     self.embedding_module.compute_embedding_iterative(
+        #         memory=memory,
+        #         source_nodes=nodes,
+        #         timestamps=timestamps,
+        #         n_layers=self.n_layers,
+        #         n_neighbors=n_neighbors,
+        #     )
+
         node_embedding_iter, C_memory_features, \
             C_neighbor_memory_features, \
             temporal_edge_contributions, sample_neighbors, sample_neighbor_edgeidx = self.embedding_module.compute_embedding_iterative(
@@ -377,261 +391,6 @@ class TGN(torch.nn.Module):
     return source_node_embedding, destination_node_embedding, negative_node_embedding, C_memory_features,  \
                C_neighbor_memory_features, temporal_edge_contributions,C_message,sample_neighbors,sample_neighbor_edgeidx
 
-
-  def compute_temporal_embeddings_withtime(self, source_nodes, destination_nodes, negative_nodes, edge_times,
-                                  edge_idxs, message_dict,memory_dict,message_trace_dict,n_neighbors=20):
-    """
-    Compute temporal embeddings for sources, destinations, and negatively sampled destinations.
-
-    source_nodes [batch_size]: source ids.
-    :param destination_nodes [batch_size]: destination ids
-    :param negative_nodes [batch_size]: ids of negative sampled destination
-    :param edge_times [batch_size]: timestamp of interaction
-    :param edge_idxs [batch_size]: index of interaction
-    :param n_neighbors [scalar]: number of temporal neighbor to consider in each convolutional
-    layer
-    :return: Temporal embeddings for sources, destinations and negatives
-    """
-
-    # print('self.use_memory',self.use_memory)
-    #
-    # print('self.memory_update_at_start',self.memory_update_at_start)
-    memory_time=0
-    neighbor_time=0
-
-    n_samples = len(source_nodes)
-    nodes = np.concatenate([source_nodes, destination_nodes, negative_nodes])
-    positives = np.concatenate([source_nodes, destination_nodes])
-    timestamps = np.concatenate([edge_times, edge_times, edge_times])
-
-    memory = None
-    time_diffs = None
-    if self.use_memory:
-      if self.memory_update_at_start:
-        # Update memory for all nodes with messages stored in previous batches
-
-        # print('self.memory.messages',type(self.memory.messages))
-        memory_start=time.time()
-        memory, last_update,C_message,C_memory,C_message_trace = self.get_updated_memory(list(range(self.n_nodes)),
-                                                      self.memory.messages,message_dict,memory_dict,message_trace_dict)
-        print('memory',memory.shape)
-        print('last_update',last_update.shape)
-        memory_end=time.time()
-
-        memory_time=memory_end-memory_start
-
-
-
-
-
-
-      else:
-        memory = self.memory.get_memory(list(range(self.n_nodes)))
-        last_update = self.memory.last_update
-      # if len(C_message)>0:
-      #     print('C_message 0',C_message[1])
-
-      ### Compute differences between the time the memory of a node was last updated,
-      ### and the time for which we want to compute the embedding of a node
-      source_time_diffs = torch.LongTensor(edge_times).to(self.device) - last_update[
-        source_nodes].long()
-      source_time_diffs = (source_time_diffs - self.mean_time_shift_src) / self.std_time_shift_src
-      destination_time_diffs = torch.LongTensor(edge_times).to(self.device) - last_update[
-        destination_nodes].long()
-      destination_time_diffs = (destination_time_diffs - self.mean_time_shift_dst) / self.std_time_shift_dst
-      negative_time_diffs = torch.LongTensor(edge_times).to(self.device) - last_update[
-        negative_nodes].long()
-      negative_time_diffs = (negative_time_diffs - self.mean_time_shift_dst) / self.std_time_shift_dst
-
-      time_diffs = torch.cat([source_time_diffs, destination_time_diffs, negative_time_diffs],
-                             dim=0)
-
-    # Compute the embeddings using the embedding module
-
-    # node_embedding = self.embedding_module.compute_embedding(memory=memory,
-    #                                                          source_nodes=nodes,
-    #                                                          timestamps=timestamps,
-    #                                                          n_layers=self.n_layers,
-    #                                                          n_neighbors=n_neighbors,
-    #                                                          time_diffs=time_diffs)
-    neighbor_start=time.time()
-
-    node_embedding_iter, C_memory_features,  \
-               C_neighbor_memory_features, \
-              temporal_edge_contributions,sample_neighbors,sample_neighbor_edgeidx= self.embedding_module.compute_embedding_iterative(
-                   memory=memory,
-                   source_nodes=nodes,
-                   timestamps=timestamps,
-                   n_layers=self.n_layers,
-                   n_neighbors=n_neighbors,
-               )
-    neighbor_end = time.time()
-
-    neighbor_time=neighbor_end-neighbor_start
-
-    # print(C_raw_features.shape)
-    print('C_memory_features.shape',C_memory_features.shape)
-    # print('C_neighbor_raw_features',C_neighbor_raw_features.shape)
-    # print(C_source_time.shape)
-    # print(C_neighbor_embeddings.shape)
-    # print(C_edge_time_embeddings.shape)
-    # print(C_edge_features.shape)
-
-    print('node_embedding_iter',node_embedding_iter.shape)
-
-
-    # total_contrib=C_raw_features.sum(dim=1)+C_memory_features.sum(dim=1)+C_source_time.sum(dim=1)+ \
-    #               C_neighbor_raw_features.sum(dim=(1,2))+C_neighbor_memory_features.sum(dim=(1,2))+C_edge_time_embeddings.sum(dim=(1,2))\
-    #               +C_edge_features.sum(dim=(1,2))
-
-    # print('verify flag', torch.allclose(total_contrib, node_embedding_iter, atol=1e-4))
-
-    node_embedding=node_embedding_iter
-
-    # C_message_to_memory_features=dict()
-    #
-    # C_old_memory_to_memory_features = dict()
-    #
-    # C_memory_features = C_memory_features.to(torch.float64)
-    #
-    # for i in range(len(nodes)):
-    #     if nodes[i] in C_message.keys():
-    #         if nodes[i] not in C_message_to_memory_features:
-    #             v = C_message[nodes[i]].to(dtype=C_memory_features.dtype, device=C_memory_features.device)
-    #             # print('v.shape',v.shape)
-    #             # print('C_memory_features[i]',C_memory_features[i].shape)
-    #             C_message_to_memory_features[nodes[i]]=v@C_memory_features[nodes[i]]
-    #
-    #     if nodes[i] in C_memory.keys():
-    #         if nodes[i] not in C_old_memory_to_memory_features:
-    #             u = C_memory[nodes[i]].to(dtype=C_memory_features.dtype, device=C_memory_features.device)
-    #             C_old_memory_to_memory_features[nodes[i]] = u @ C_memory_features[nodes[i]]
-    #
-    #     else:
-    #         pass
-    #         # print('yes',update_node)
-    #
-    # memory1_verify=True
-    #
-    # for i in range(len(nodes)):
-    #     if nodes[i] in C_message_to_memory_features:
-    #         test1=C_message_to_memory_features[nodes[i]].sum(dim=0)+C_old_memory_to_memory_features[nodes[i]].sum(dim=0)
-    #         test2=C_memory_features[nodes[i]].sum(dim=0)
-    #         if torch.allclose(test1, test2, atol=1e-4)==False:
-    #             memory1_verify=False
-    #         # print('memory1 verify', )
-    #         # print('test1',)
-    #         # print('test2',)
-    # print('memory1_verify',memory1_verify)
-
-
-
-
-
-
-
-
-
-    # if torch.allclose(node_embedding, node_embedding_iter, atol=1e-6, rtol=1e-5):
-    #     print("两个 embedding 在数值上近似相等")
-    # else:
-    #     print(" 两个 embedding 存在差异")
-
-    # print('node_embedding_iter',node_embedding_iter)
-    # print('node_embedding', node_embedding)
-    #print('edge_contributions',edge_contributions)
-
-
-    # print('per_message_contrib',per_message_contrib)
-    # print('per_old_memory_contrib',per_old_memory_contrib)
-
-    source_node_embedding = node_embedding[:n_samples]
-    destination_node_embedding = node_embedding[n_samples: 2 * n_samples]
-    negative_node_embedding = node_embedding[2 * n_samples:]
-
-
-
-
-    if self.use_memory and  ( not self.forbidden_memory_update):
-      if self.memory_update_at_start:
-        # Persist the updates to the memory only for sources and destinations (since now we have
-        # new messages for them)
-        print('positives',positives.shape)
-        # for key,value in self.memory.messages.items():
-        #     if len(value)!=0:
-        #         print('key', key)
-        #         print('value', len(value))
-        #         print(value)
-
-
-        #print('memory.messages',self.memory.messages)
-        self.update_memory(positives, self.memory.messages)
-
-        assert torch.allclose(memory[positives], self.memory.get_memory(positives), atol=1e-5), \
-          "Something wrong in how the memory was updated"
-
-        # Remove messages for the positives since we have already updated the memory using them
-        self.memory.clear_messages(positives)
-
-      unique_sources, source_id_to_messages = self.get_raw_messages(source_nodes,
-                                                                    source_node_embedding,
-                                                                    destination_nodes,
-                                                                    destination_node_embedding,
-                                                                    edge_times, edge_idxs)
-      unique_destinations, destination_id_to_messages = self.get_raw_messages(destination_nodes,
-                                                                              destination_node_embedding,
-                                                                              source_nodes,
-                                                                              source_node_embedding,
-                                                                              edge_times, edge_idxs)
-      # print('unique_sources',unique_sources)
-      # print('source_id_to_messages',source_id_to_messages)
-      # print('unique_destinations',unique_destinations)
-      if self.memory_update_at_start:
-        self.memory.store_raw_messages(unique_sources, source_id_to_messages)
-        self.memory.store_raw_messages(unique_destinations, destination_id_to_messages)
-      else:
-        self.update_memory(unique_sources, source_id_to_messages)
-        self.update_memory(unique_destinations, destination_id_to_messages)
-
-      if self.dyrep:
-        source_node_embedding = memory[source_nodes]
-        destination_node_embedding = memory[destination_nodes]
-        negative_node_embedding = memory[negative_nodes]
-
-    #   n_samples = len(source_nodes)
-    #   total_contrib_source = total_contrib[:n_samples]
-    #   total_contrib_destination = total_contrib[n_samples:2 * n_samples]
-    #   total_contrib_negative = total_contrib[2 * n_samples:]
-    #
-    #   # 验证source部分
-    #   source_check = torch.allclose(total_contrib_source, source_node_embedding, atol=1e-4)
-    #   print(f"Source贡献值验证: {'通过' if source_check else '失败'}")
-    #   if not source_check:
-    #       print(f"Source差异: {torch.abs(total_contrib_source - source_node_embedding).max():.6f}")
-    #
-    #   # 验证destination部分
-    #   dest_check = torch.allclose(total_contrib_destination, destination_node_embedding, atol=1e-4)
-    #   print(f"Destination贡献值验证: {'通过' if dest_check else '失败'}")
-    #   if not dest_check:
-    #       print(f"Destination差异: {torch.abs(total_contrib_destination - destination_node_embedding).max():.6f}")
-    #
-    #   # 验证negative部分
-    #   neg_check = torch.allclose(total_contrib_negative, negative_node_embedding, atol=1e-4)
-    #   print(f"Negative贡献值验证: {'通过' if neg_check else '失败'}")
-    #   if not neg_check:
-    #       print(f"Negative差异: {torch.abs(total_contrib_negative - negative_node_embedding).max():.6f}")
-    #
-    #   # 总体验证
-    #   overall_check = source_check and dest_check and neg_check
-    #   print(f"总体贡献值验证: {'通过' if overall_check else '失败'}")
-    #
-    # print('source_node_embedding',source_node_embedding.shape)
-    # print('destination_node_embedding', destination_node_embedding.shape)
-    # print('negative_node_embedding',negative_node_embedding.shape)
-
-
-    return source_node_embedding, destination_node_embedding, negative_node_embedding, C_memory_features,  \
-               C_neighbor_memory_features, temporal_edge_contributions,C_message,sample_neighbors,sample_neighbor_edgeidx,memory_time,neighbor_time
 
   def compute_temporal_embeddings_without_contributions(self, source_nodes, destination_nodes, negative_nodes, edge_times,
                                   edge_idxs,n_neighbors=20):

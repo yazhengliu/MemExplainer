@@ -1189,227 +1189,6 @@ class GraphEmbedding(EmbeddingModule):
 
           return source_embedding
 
-  def compute_embedding(self, memory, source_nodes, timestamps, n_layers, n_neighbors=20, time_diffs=None,
-                        use_time_proj=True):
-    """Recursive implementation of curr_layers temporal graph attention layers.
-
-    src_idx_l [batch_size]: users / items input ids.
-    cut_time_l [batch_size]: scalar representing the instant of the time where we want to extract the user / item representation.
-    curr_layers [scalar]: number of temporal convolutional layers to stack.
-    num_neighbors [scalar]: number of temporal neighbor to consider in each convolutional layer.
-    """
-
-    assert (n_layers >= 0)
-    print('source_nodes',len(source_nodes),source_nodes)
-
-    source_nodes_torch = torch.from_numpy(source_nodes).long().to(self.device)
-    timestamps_torch = torch.unsqueeze(torch.from_numpy(timestamps).float().to(self.device), dim=1)
-
-    # query node always has the start time -> time span == 0
-    source_nodes_time_embedding = self.time_encoder(torch.zeros_like(
-      timestamps_torch))
-
-    source_node_features = self.node_features[source_nodes_torch, :]
-    print('source_node_features',source_node_features.shape)
-
-    if self.use_memory:
-      source_node_features = memory[source_nodes, :] + source_node_features
-      # print('memory.shape',memory.shape)
-      #
-      # print('source_node_features.shape',source_node_features.shape)
-
-
-
-    if n_layers == 0:
-      return source_node_features
-    else:
-
-      source_node_conv_embeddings = self.compute_embedding(memory,
-                                                           source_nodes,
-                                                           timestamps,
-                                                           n_layers=n_layers - 1,
-                                                           n_neighbors=n_neighbors)
-
-      print('source_node_conv_embeddings',source_node_conv_embeddings.shape)
-
-      neighbors, edge_idxs, edge_times = self.neighbor_finder.get_temporal_neighbor(
-        source_nodes,
-        timestamps,
-        n_neighbors=n_neighbors)
-      print('neighbors',neighbors.shape,neighbors)
-      print('edge_idxs',edge_idxs.shape ,edge_idxs)
-      print('edge_times',edge_times.shape,edge_times)
-
-
-      neighbors_torch = torch.from_numpy(neighbors).long().to(self.device)
-
-      edge_idxs = torch.from_numpy(edge_idxs).long().to(self.device)
-
-      edge_deltas = timestamps[:, np.newaxis] - edge_times
-
-      edge_deltas_torch = torch.from_numpy(edge_deltas).float().to(self.device)
-
-      neighbors = neighbors.flatten()
-      neighbor_embeddings = self.compute_embedding(memory,
-                                                   neighbors,
-                                                   np.repeat(timestamps, n_neighbors),
-                                                   n_layers=n_layers - 1,
-                                                   n_neighbors=n_neighbors)
-
-      effective_n_neighbors = n_neighbors if n_neighbors > 0 else 1
-      neighbor_embeddings = neighbor_embeddings.view(len(source_nodes), effective_n_neighbors, -1)
-      edge_time_embeddings = self.time_encoder(edge_deltas_torch)
-
-      edge_features = self.edge_features[edge_idxs, :]
-
-      mask = neighbors_torch == 0
-
-      source_embedding,C_source_h,C_source_time,C_neighbor_embeddings,\
-           C_edge_time_embeddings,C_edge_features = self.aggregate(n_layers, source_node_conv_embeddings,
-                                        source_nodes_time_embedding,
-                                        neighbor_embeddings,
-                                        edge_time_embeddings,
-                                        edge_features,
-                                        mask)
-
-      return source_embedding
-
-  def compute_embedding_baseline(
-          self,
-          memory,
-          source_nodes,
-          timestamps,
-          n_layers,
-          n_neighbors=20,
-          time_diffs=None,
-          use_time_proj=True,
-          edge_idx_preserve_list=None,
-          candidate_weights_dict=None,
-  ):
-      """Recursive implementation of curr_layers temporal graph attention layers.
-
-      src_idx_l [batch_size]: users / items input ids.
-      cut_time_l [batch_size]: scalar representing the instant of the time where we want to extract the user / item representation.
-      curr_layers [scalar]: number of temporal convolutional layers to stack.
-      num_neighbors [scalar]: number of temporal neighbor to consider in each convolutional layer.
-      """
-
-      assert n_layers >= 0
-
-      source_nodes_torch = torch.from_numpy(source_nodes).long().to(self.device)
-      timestamps_torch = torch.unsqueeze(
-          torch.from_numpy(timestamps).float().to(self.device), dim=1
-      )
-
-      # query node always has the start time -> time span == 0
-      source_nodes_time_embedding = self.time_encoder(
-          torch.zeros_like(timestamps_torch)
-      )
-
-      source_node_features = self.node_features[source_nodes_torch, :]
-
-      if self.use_memory:
-          source_node_features = memory[source_nodes, :] + source_node_features
-
-      if n_layers == 0:
-          return source_node_features
-      else:
-          # print('n_neighbors',n_neighbors)
-          (
-              neighbors,
-              edge_idxs,
-              edge_times,
-          ) = self.neighbor_finder.get_temporal_neighbor(
-              source_nodes,
-              timestamps,
-              num_neighbors=n_neighbors,
-              edge_idx_preserve_list=edge_idx_preserve_list,
-          )
-
-          neighbors_torch = torch.from_numpy(neighbors).long().to(self.device)
-
-          edge_idxs = torch.from_numpy(edge_idxs).long().to(self.device)
-
-          edge_deltas = timestamps[:, np.newaxis] - edge_times
-
-          # edge_times = torch.from_numpy(edge_times).float().to(self.device)
-
-          edge_deltas_torch = torch.from_numpy(edge_deltas).float().to(self.device)
-
-          neighbors = neighbors.flatten()
-          # import ipdb; ipdb.set_trace()
-          neighbor_embeddings = self.compute_embedding_baseline(
-              memory,
-              neighbors,
-              # np.repeat(timestamps, n_neighbors),
-              edge_times.flatten(),
-              # NOTE: important! otherwise igh_finder cannot find some neighbors that it should find.
-              n_layers=n_layers - 1,
-              n_neighbors=n_neighbors,
-              edge_idx_preserve_list=edge_idx_preserve_list,
-              candidate_weights_dict=candidate_weights_dict,
-          )
-
-          effective_n_neighbors = n_neighbors if n_neighbors > 0 else 1
-          neighbor_embeddings = neighbor_embeddings.view(
-              len(source_nodes), effective_n_neighbors, -1
-          )
-          edge_time_embeddings = self.time_encoder(edge_deltas_torch)
-
-          edge_features = self.edge_features[edge_idxs, :]
-
-          # mask = edge_idxs == 0 # NOTE: True to be masked out, i.e., 0 positions
-          position0 = edge_idxs == 0
-          mask = torch.zeros_like(position0).to(dtype=torch.float32)
-          mask[position0] = -1e10
-
-          # import ipdb; ipdb.set_trace()
-          if candidate_weights_dict is not None:
-              # TODO: support for pg explainer.
-              # import ipdb; ipdb.set_trace()
-              position0 = edge_idxs == 0
-              mask = torch.zeros_like(position0).to(dtype=torch.float32)
-
-              event_idxs = candidate_weights_dict["candidate_events"]
-              event_weights = candidate_weights_dict["edge_weights"]
-              for i, e_idx in enumerate(event_idxs):
-                  indices = edge_idxs == e_idx
-                  mask[indices] = event_weights[i]
-
-              mask[
-                  position0
-              ] = (
-                  -1e10
-              )  # because the addition in torch's multi-head attention implementation
-              # import ipdb; ipdb.set_trace()
-
-          source_embedding, atten_weights = self.aggregate_baseline(
-              n_layers,
-              source_node_features,
-              source_nodes_time_embedding,
-              neighbor_embeddings,
-              edge_time_embeddings,
-              edge_features,
-              mask,
-          )
-
-          # preserve_mask = edge_idxs != 0
-          # edge_idxs = edge_idxs[preserve_mask]
-          # atten_weights = atten_weights[preserve_mask].reshape((self.n_heads, neighbors_torch.shape[1]))
-
-          # self.atten_weights_list.append(
-          #     {
-          #         "layer": n_layers,
-          #         "src_nodes": source_nodes_torch[source_nodes_torch != 0],
-          #         "src_ngh_nodes": neighbors_torch[neighbors_torch != 0],
-          #         "src_ngh_eidx": edge_idxs[edge_idxs != 0],
-          #         "attn_weight": atten_weights[edge_idxs != 0],
-          #     }
-          # )
-          # import ipdb; ipdb.set_trace()
-
-          return source_embedding
-
 
 
   def aggregate(self, n_layers, source_node_features, source_nodes_time_embedding,
@@ -1422,10 +1201,6 @@ class GraphEmbedding(EmbeddingModule):
     return NotImplemented
 
 
-
-
-
-
   def compute_embedding_iterative(self, memory, source_nodes, timestamps, n_layers, n_neighbors=20):
       B = len(source_nodes)
       #print('source nodes',source_nodes)
@@ -1434,7 +1209,7 @@ class GraphEmbedding(EmbeddingModule):
 
       raw_source_node_features = self.node_features[source_nodes_torch, :]  # [B, D_node]
 
-      print('raw_source_node_features',raw_source_node_features.shape)
+      # print('raw_source_node_features',raw_source_node_features.shape)
 
       # 最底层：静态特征 + memory（可选）
       h = raw_source_node_features.clone()
@@ -1472,21 +1247,21 @@ class GraphEmbedding(EmbeddingModule):
 
           # 获取邻居嵌入（从上一层）
           flat_neighbors = neighbors.flatten()
-          print('flat_neighbors ',len(flat_neighbors) )
+          # print('flat_neighbors ',len(flat_neighbors) )
           h_neighbors = self.node_features[flat_neighbors, :]
           if self.use_memory:
               h_neighbors = h_neighbors + memory[flat_neighbors, :]
-          print('h_neighbors ', h_neighbors.shape)
+          # print('h_neighbors ', h_neighbors.shape)
 
           h_neighbors = h_neighbors.view(B, n_neighbors, -1)
 
-          print('h_neighbors',h_neighbors.shape)
+          # print('h_neighbors',h_neighbors.shape)
 
           # 时间编码与边特征
           edge_time_embeddings = self.time_encoder(edge_deltas_torch)  # [B, N, Dₜ]
-          print('edge_time_embeddings',edge_time_embeddings.shape)
+          # print('edge_time_embeddings',edge_time_embeddings.shape)
           edge_features = self.edge_features[edge_idxs_torch, :]  # [B, N, Dₑ]
-          print('edge_features',edge_features.shape)
+          # print('edge_features',edge_features.shape)
           mask = neighbors_torch == 0  # [B, N]
 
 
@@ -1930,39 +1705,6 @@ class GraphSumEmbedding(GraphEmbedding):
 
       # print('linear 1',torch.allclose(C.sum(dim=1), out, atol=1e-4))
       return C
-  def aggregate_baseline(
-          self,
-          n_layer,
-          source_node_features,
-          source_nodes_time_embedding,
-          neighbor_embeddings,
-          edge_time_embeddings,
-          edge_features,
-          mask,
-  ):
-      source_node_features = source_node_features.double()
-      source_nodes_time_embedding = source_nodes_time_embedding.double()
-      neighbor_embeddings = neighbor_embeddings.double()
-      edge_time_embeddings = edge_time_embeddings.double()
-      edge_features = edge_features.double()
-
-      neighbors_features = torch.cat(
-          [neighbor_embeddings, edge_time_embeddings, edge_features], dim=2
-      )
-      neighbor_embeddings = self.linear_1[n_layer - 1](neighbors_features)
-      neighbors_sum = torch.nn.functional.relu(torch.sum(neighbor_embeddings, dim=1))
-
-      source_features = torch.cat(
-          [source_node_features, source_nodes_time_embedding.squeeze()], dim=1
-      )
-      source_embedding = torch.cat([neighbors_sum, source_features], dim=1)
-      source_embedding = self.linear_2[n_layer - 1](source_embedding)
-
-      return source_embedding, None
-
-
-
-
 
 
   def aggregate(self, n_layer, source_node_features, source_nodes_time_embedding,
@@ -2302,59 +2044,6 @@ class GraphAttentionEmbedding(GraphEmbedding):
             )
             self.custom_attention_models[i].eval()
 
-  def aggregate_baseline(
-          self,
-          n_layer,
-          source_node_features,
-          source_nodes_time_embedding,
-          neighbor_embeddings,
-          edge_time_embeddings,
-          edge_features,
-          mask,
-  ):
-      """Baseline aggregation method for GraphAttentionEmbedding.
-      Similar to aggregate_without_contribution but returns (source_embedding, None) format.
-      """
-      attention_model = self.attention_models[n_layer - 1]
-
-      B = source_node_features.shape[0]  # batch size
-      K = neighbor_embeddings.shape[1]  # number of neighbors
-      D_n = neighbor_embeddings.shape[2]  # neighbor embedding dim
-      D_e = edge_features.shape[2]  # edge feature dim
-      D_t = edge_time_embeddings.shape[2]  # time embedding dim
-      D_s = source_node_features.shape[1]  # source node feature dim
-
-      src_node_features_unrolled = torch.unsqueeze(source_node_features, dim=1)  # [B, 1, D_s]
-      query = torch.cat([src_node_features_unrolled, source_nodes_time_embedding], dim=2)  # [B, 1, D_s + D_t]
-      key = torch.cat([neighbor_embeddings, edge_features, edge_time_embeddings], dim=2)  # [B, K, D_n + D_e + D_t]
-
-      query_perm = query.permute([1, 0, 2])  # [1, B, D_s + D_t]
-      key_perm = key.permute([1, 0, 2])  # [K, B, D_n + D_e + D_t]
-
-      mask_bool = mask < 0  # True for positions to mask out
-
-      invalid_neighborhood_mask = mask_bool.all(dim=1, keepdim=True)
-      mask_processed = mask_bool.clone()
-      # If a source node has no valid neighbor, set its first neighbor to be valid
-      mask_processed[invalid_neighborhood_mask.squeeze(), 0] = False
-
-      attention_model_test = self.custom_attention_models[n_layer - 1]
-
-      attn_output, attn_output_weights = attention_model_test.forward(
-          query=query_perm,
-          key=key_perm,
-          value=key_perm,
-          key_padding_mask=mask_processed
-      )
-
-      attn_output = attn_output.squeeze()  # [B, D_s + D_t]
-      attn_output_weights = attn_output_weights.squeeze()  # [B, K] or [B, 1, K] -> [B, K]
-
-      final_output = attention_model.merger.forward(
-          attn_output, source_node_features
-      )
-
-      return final_output, attn_output_weights
 
   def aggregate_explainweights(
           self,
