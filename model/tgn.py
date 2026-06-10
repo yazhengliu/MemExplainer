@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from collections import defaultdict
 # from .edge_relevance_explainer import EdgeRelevanceExplainer
-from tools.compare_graph_sum_outputs import compare_graph_sum_outputs_from_tgn
+# from tools.compare_graph_sum_outputs import compare_graph_sum_outputs_from_tgn
 
 from utils.utils import MergeLayer
 from modules.memory import Memory
