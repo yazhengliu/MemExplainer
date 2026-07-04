@@ -89,4 +89,27 @@ python train_video.py --config configs/train_video_{data}.json
   </tbody>
 </table>
 
+## 3. TGNs explanation
+### Link prediction task
+
+To explain the temporal graph neural networks, run the following commands. Replace `{data}` with `uci`, `wikipedia`, `reddit`, or `enron`.
+
+```bash
+python explain_link_prediction.py --config configs/explain_link_prediction_{data}.json
+```
+
+### Node property prediction task
+
+To explain the temporal graph neural networks, run the following commands. Replace `{data}` with `genre`, `reddit`, or `trade`.
+
+```bash
+python explain_node_prediction.py --config configs/explain_node_prediction_{data}.json
+```
+
+### Pose-based action classification task
+To explain the temporal graph neural networks, run the following command. Replace `{data}` with `penn` or `hmdb`.
+```bash
+python explain_video.py --config configs/explain_video_{data}.json
+```
+
 
