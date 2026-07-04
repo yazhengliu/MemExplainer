@@ -112,4 +112,46 @@ To explain the temporal graph neural networks, run the following command. Replac
 python explain_video.py --config configs/explain_video_{data}.json
 ```
 
+<table>
+  <thead>
+    <tr>
+      <th width="280">Parameter</th>
+      <th>Description</th>
+      <th>Common values</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td nowrap><code>--max_depth</code></td>
+      <td>Maximum depth of memory backtracking trees.</td>
+      <td>task dependent</td>
+    </tr>
+    <tr>
+      <td nowrap><code>--backtrace_child_prune_ratio</code></td>
+      <td>Ratio of backtracking children kept at each step. <code>1.0</code> keeps all children.</td>
+      <td><code>0.0</code>-<code>1.0</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--edge_selection_mode</code></td>
+      <td>Strategy for selecting explanatory edges.</td>
+      <td><code>ratio</code>, <code>given_number</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--select_edge_ratio</code></td>
+      <td>Edge selection ratios used when <code>edge_selection_mode=ratio</code>.</td>
+      <td>e.g. <code>0.1 0.2 0.3 0.4 0.5</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--given_select_numbers</code></td>
+      <td>Exact edge counts used when <code>edge_selection_mode=given_number</code>.</td>
+      <td>e.g. <code>1 2 3 4 5</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--verbose_debug</code></td>
+      <td>Prints detailed attribution logs.</td>
+      <td><code>true</code>, <code>false</code></td>
+    </tr>
+  </tbody>
+</table>
+
 
