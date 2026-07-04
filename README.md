@@ -169,7 +169,7 @@ python explain_video.py --config configs/explain_video_{data}.json
 #### Memory Replay for Large Graphs
 For large link prediction datasets, tracing all historical memory updates can be costly. To reduce overhead, replay is split into two stages. `--total_batch` sets the total number of temporal batches used to warm up model memory before explanation. `--explain_epoch` sets the batch from which memory-update tracing starts. Earlier batches only warm up TGN memory, while batches from `--explain_epoch` to `--total_batch` are also tracked for memory backtracking and attribution.
 
-### Citation
+## 4. Citation
 If you use this code in your research, please cite:
 ```bash
 @article{MemExplainer,
