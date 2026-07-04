@@ -112,6 +112,17 @@ To explain the temporal graph neural networks, run the following command. Replac
 python explain_video.py --config configs/explain_video_{data}.json
 ```
 
+**The current explanation algorithm supports TGN models trained with the following architecture settings**.
+
+| Parameter | Supported values |
+| --- | --- |
+| `--embedding_module` | `graph_attention`, `graph_sum` |
+| `--aggregator` | `last`, `mean` |
+| `--message_function` | `identity` |
+| `--memory_updater` | `gru`, `rnn` |
+| `--n_layer` | any positive integer |
+
+**Explanation Parameters**
 <table>
   <thead>
     <tr>
