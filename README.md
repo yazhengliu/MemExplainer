@@ -12,9 +12,7 @@ python data_process/penn_action_process.py
 python data_process/process_hmdb51.py
 ```
 
-
-
-## 3. TGNs training
+## 2. TGNs training
 ### Link prediction task
 
 To train the temporal graph neural networks, run the following commands. Replace `{data}` with `uci`, `wikipedia`, `reddit`, or `enron`.
@@ -36,3 +34,16 @@ To train the temporal graph neural networks, run the following command. Replace 
 ```bash
 python train_video.py --config configs/train_video_{data}.json
 ```
+**TGN Training Parameters**
+
+
+| Parameter | Description | Common values |
+| --- | --- | --- |
+| `--embedding_module` | Temporal embedding module used by TGN. | `graph_sum`, `graph_attention`, `identity`, `time` |
+| `--aggregator` | Aggregates messages for each node. | `last`, `mean` |
+| `--message_function` | Transforms raw messages before memory update. | `identity`, `mlp` |
+| `--memory_updater` | Updates node memory after receiving messages. | `gru`, `rnn` |
+| `--use_memory` | Enables TGN node memory. Use `--no-use_memory` to disable it. | `true`, `false` |
+| `--n_layer` | Number of temporal graph embedding layers. | task dependent |
+| `--n_head` | Number of attention heads. | task dependent |
+| `--n_degree` | Number of temporal neighbors sampled per node. | task dependent |
