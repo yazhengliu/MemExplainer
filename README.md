@@ -74,17 +74,17 @@ python train_video.py --config configs/train_video_{data}.json
     <tr>
       <td nowrap><code>--n_layer</code></td>
       <td>Number of temporal graph embedding layers.</td>
-      <td>Default 1</td>
+      <td>Default value: 1</td>
     </tr>
     <tr>
       <td nowrap><code>--n_head</code></td>
       <td>Number of attention heads.</td>
-      <td>Default 2</td>
+      <td>Default value: 2</td>
     </tr>
     <tr>
       <td nowrap><code>--n_degree</code></td>
       <td>Number of temporal neighbors sampled per node.</td>
-      <td>Default 10</td>
+      <td>Default value: 10</td>
     </tr>
   </tbody>
 </table>
