@@ -34,16 +34,59 @@ To train the temporal graph neural networks, run the following command. Replace 
 ```bash
 python train_video.py --config configs/train_video_{data}.json
 ```
+
 **TGN Training Parameters**
 
+<table>
+  <thead>
+    <tr>
+      <th width="220">Parameter</th>
+      <th>Description</th>
+      <th>Common values</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td nowrap><code>--embedding_module</code></td>
+      <td>Temporal embedding module used by TGN.</td>
+      <td><code>graph_sum</code>, <code>graph_attention</code>, <code>identity</code>, <code>time</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--aggregator</code></td>
+      <td>Aggregates messages for each node.</td>
+      <td><code>last</code>, <code>mean</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--message_function</code></td>
+      <td>Transforms raw messages before memory update.</td>
+      <td><code>identity</code>, <code>mlp</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--memory_updater</code></td>
+      <td>Updates node memory after receiving messages.</td>
+      <td><code>gru</code>, <code>rnn</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--use_memory</code></td>
+      <td>Enables TGN node memory.</td>
+      <td><code>true</code>, <code>false</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--n_layer</code></td>
+      <td>Number of temporal graph embedding layers.</td>
+      <td>Default 1</td>
+    </tr>
+    <tr>
+      <td nowrap><code>--n_head</code></td>
+      <td>Number of attention heads.</td>
+      <td>Default 2</td>
+    </tr>
+    <tr>
+      <td nowrap><code>--n_degree</code></td>
+      <td>Number of temporal neighbors sampled per node.</td>
+      <td>Default 10</td>
+    </tr>
+  </tbody>
+</table>
 
-| Parameter | Description | Common values |
-| --- | --- | --- |
-| `--embedding_module` | Temporal embedding module used by TGN. | `graph_sum`, `graph_attention`, `identity`, `time` |
-| `--aggregator` | Aggregates messages for each node. | `last`, `mean` |
-| `--message_function` | Transforms raw messages before memory update. | `identity`, `mlp` |
-| `--memory_updater` | Updates node memory after receiving messages. | `gru`, `rnn` |
-| `--use_memory` | Enables TGN node memory. Use `--no-use_memory` to disable it. | `true`, `false` |
-| `--n_layer` | Number of temporal graph embedding layers. | task dependent |
-| `--n_head` | Number of attention heads. | task dependent |
-| `--n_degree` | Number of temporal neighbors sampled per node. | task dependent |
+
