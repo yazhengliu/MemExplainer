@@ -1,26 +1,17 @@
 # MemExplainer
-We are currently cleaning the codebase and preparing documentation. 
+This is the Pytorch Implementation of [Towards the Explainability of Temporal Graph Networks via Memory
+Backtracking and Topological Attribution](https://openreview.net/forum?id=sKAgLgpujy&referrer=%5BAuthor%20Console%5D(%2Fgroup%3Fid%3DICML.cc%2F2026%2FConference%2FAuthors%23your-submissions))
+## 1. Data
 
-## 1. Dataset Download
-### Pose-based action classification task
-We train TGNs on pose-based action classification datasets, including Penn Action and HMDB51.
+The raw and processed data are stored at [this](https://hkustgz-my.sharepoint.com/:f:/g/personal/yliu533_connect_hkust-gz_edu_cn/IgBLe4o3K1LyTLoyElSmrD3kAXIiYe-dZm3uWVWHvNs7Zqk?e=WbKWwL)
 
-- Penn Action: https://dreamdragon.github.io/PennAction/
-- HMDB51: https://serre-lab.clps.brown.edu/resource/hmdb-a-large-human-motion-database/
+If you want to rebuild human pose-based data from raw datasets, run:
 
-Please download the datasets from their official websites and place them under the `data` folder.
-
-## 2. Data Preprocessing
-
-To convert raw Penn Action frames and labels into temporal graph datasets, run:
 ```bash
 python data_process/penn_action_process.py
-```
-
-To convert raw HMDB51 data into temporal graph datasets, run:
-```bash
 python data_process/process_hmdb51.py
 ```
+
 
 
 ## 3. TGNs training
