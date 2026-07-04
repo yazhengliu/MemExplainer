@@ -16,17 +16,31 @@ class SequenceMemoryUpdater(MemoryUpdater):
     self.message_dimension = message_dimension
     self.device = device
 
+  def _align_timestamps(self, timestamps):
+    return torch.as_tensor(
+      timestamps,
+      device=self.memory.last_update.device,
+      dtype=self.memory.last_update.dtype,
+    )
+
+  def _updater_dtype_device(self):
+    param = next(self.memory_updater.parameters())
+    return param.dtype, param.device
+
   def update_memory(self, unique_node_ids, unique_messages, timestamps):
     if len(unique_node_ids) <= 0:
       return
 
     # print('memory.get_last_update',self.memory.get_last_update(unique_node_ids))
     # print('timestamps',timestamps)
+    timestamps = self._align_timestamps(timestamps)
 
     assert (self.memory.get_last_update(unique_node_ids) <= timestamps).all().item(), "Trying to " \
                                                                                      "update memory to time in the past"
 
-    memory = self.memory.get_memory(unique_node_ids)
+    updater_dtype, updater_device = self._updater_dtype_device()
+    memory = self.memory.get_memory(unique_node_ids).to(dtype=updater_dtype, device=updater_device)
+    unique_messages = unique_messages.to(dtype=updater_dtype, device=updater_device)
     self.memory.last_update[unique_node_ids] = timestamps
 
     updated_memory = self.memory_updater(unique_messages, memory)
@@ -41,19 +55,24 @@ class SequenceMemoryUpdater(MemoryUpdater):
 
     # print('timestamps',timestamps)
     # print(self.memory.get_last_update(unique_node_ids))
+    timestamps = self._align_timestamps(timestamps)
 
     assert (self.memory.get_last_update(unique_node_ids) <= timestamps).all().item(), "Trying to " \
                                                                                      "update memory to time in the past"
 
-    updated_memory = self.memory.memory.data.clone()
+    updater_dtype, updater_device = self._updater_dtype_device()
+    updated_memory = self.memory.memory.data.clone().to(dtype=updater_dtype, device=updater_device)
 
-
+    unique_messages = unique_messages.to(
+      dtype=updater_dtype,
+      device=updater_device,
+    )
 
     updated_memory[unique_node_ids] = self.memory_updater(unique_messages, updated_memory[unique_node_ids])
 
     # print('memory contribution verify',torch.allclose(C_unique_messages.sum(dim=1) + C_updated_memory.sum(dim=1),updated_memory[unique_node_ids] , atol=1e-4))
 
-    updated_last_update = self.memory.last_update.data.clone()
+    updated_last_update = self.memory.last_update.data.clone().to(device=updater_device)
     updated_last_update[unique_node_ids] = timestamps
 
 
@@ -65,12 +84,19 @@ class SequenceMemoryUpdater(MemoryUpdater):
     if len(unique_node_ids) <= 0:
       # 空更新：返回原内存与时间戳，同时返回空贡献张量
 
-      return self.memory.memory.data.clone(), self.memory.last_update.data.clone(), {},{},{}
+      return self.memory.memory.data.clone(), self.memory.last_update.data.clone(), C_message_full,C_memory_full,C_message_trace_full
+
+    timestamps = self._align_timestamps(timestamps)
 
     assert (self.memory.get_last_update(unique_node_ids) <= timestamps).all().item(), "Trying to " \
                                                                                      "update memory to time in the past"
 
-    updated_memory = self.memory.memory.data.clone()
+    updater_dtype, updater_device = self._updater_dtype_device()
+    updated_memory = self.memory.memory.data.clone().to(dtype=updater_dtype, device=updater_device)
+    unique_messages = unique_messages.to(
+      dtype=updater_dtype,
+      device=updater_device,
+    )
 
 
     # num_nodes, hidden_dim = self.memory.memory.shape
@@ -93,12 +119,9 @@ class SequenceMemoryUpdater(MemoryUpdater):
     if isinstance(self.memory_updater, nn.GRUCell):
       C_unique_messages,C_updated_memory = lrp_grucell_contrib_full(unique_messages, updated_memory[unique_node_ids],
                                                           self.memory_updater, return_ratio=True)
-      print('GRU')
     elif isinstance(self.memory_updater, nn.RNNCell):
       C_unique_messages,C_updated_memory  = lrp_rnncell_contrib_full(unique_messages, updated_memory[unique_node_ids],
                                                           self.memory_updater, return_ratio=True)
-
-      print('rnn')
 
     # print('C_unique_messages',C_unique_messages.shape)
     # print('C_updated_memory',C_updated_memory.shape)
@@ -135,58 +158,59 @@ class SequenceMemoryUpdater(MemoryUpdater):
 
 
 
-      edge_info = edge_info_list[i]
       message_contrib = C_unique_messages[i]  # [message_dim, memory_dim]
       memory_contrib = C_updated_memory[i]  # [memory_dim, memory_dim]
 
+      current_edge_infos = edge_info_list[i]
+      if not isinstance(current_edge_infos, list):
+        current_edge_infos = [current_edge_infos]
 
+      n_edge_infos = max(len(current_edge_infos), 1)
 
-      source_dim = edge_info['source_memory.shape'][1]
-      dest_dim =  edge_info['destination_memory.shape'][1]
-      edge_dim =  edge_info['edge_features.shape'][1]
-      time_dim =  edge_info['time_embedding.shape'][1]
+      structured_contribs = []
+      trace_infos = []
 
-      start_idx = 0
-      source_contrib = message_contrib[start_idx:start_idx + source_dim, :]
-      start_idx += source_dim
+      for edge_info in current_edge_infos:
+        message_contrib_part = message_contrib / n_edge_infos
+        memory_contrib_part = memory_contrib / n_edge_infos
 
-      dest_contrib = message_contrib[start_idx:start_idx + dest_dim, :]
-      start_idx += dest_dim
+        source_dim = edge_info['source_memory.shape'][1]
+        dest_dim = edge_info['destination_memory.shape'][1]
+        edge_dim = edge_info['edge_features.shape'][1]
+        time_dim = edge_info['time_embedding.shape'][1]
 
-      edge_contrib = message_contrib[start_idx:start_idx + edge_dim, :]
-      start_idx += time_dim
+        start_idx = 0
+        source_contrib = message_contrib_part[start_idx:start_idx + source_dim, :]
+        start_idx += source_dim
 
-      time_contrib = message_contrib[start_idx:, :]
+        dest_contrib = message_contrib_part[start_idx:start_idx + dest_dim, :]
+        start_idx += dest_dim
 
-      structured_contrib = {
-        'source_node':edge_info['source_node'],
-        'destination_node': edge_info['destination_node'],
-        'source_node_contribution': source_contrib+memory_contrib,
-        'destination_node_contribution': dest_contrib,
-        'edge': edge_contrib+time_contrib,
-        'edge_idx':edge_info['edge_idx']
-      }
+        edge_contrib = message_contrib_part[start_idx:start_idx + edge_dim, :]
+        start_idx += edge_dim
 
+        time_contrib = message_contrib_part[start_idx:start_idx + time_dim, :]
+        if edge_contrib.shape[0] != time_contrib.shape[0]:
+          edge_contrib = edge_contrib.sum(dim=0, keepdim=True).expand_as(time_contrib)
 
-      # C_message_full[node_id_item][timestamp_item] = C_unique_messages[i]  # [1, hidden_dim]
+        structured_contribs.append({
+          'source_node': edge_info['source_node'],
+          'destination_node': edge_info['destination_node'],
+          'source_node_contribution': source_contrib + memory_contrib_part,
+          'destination_node_contribution': dest_contrib,
+          'edge': edge_contrib + time_contrib,
+          'edge_idx': edge_info['edge_idx']
+        })
+        trace_infos.append(edge_info)
 
-
-      #
-      # if timestamp_item not in C_message_full[node_id_item]:
-      #   C_message_full[node_id_item][timestamp_item] = []
-      #
-      # edge_idx_exists = any(
-      #   record.get('edge_idx') == edge_info['edge_idx'] for record in C_message_full[node_id_item][timestamp_item])
-      #
-      # if not edge_idx_exists:
-      #
-      #   C_message_full[node_id_item][timestamp_item].append(structured_contrib)
-
-      C_message_full[node_id_item][timestamp_item] = structured_contrib  # [1, hidden_dim]
+      if len(structured_contribs) == 1:
+        C_message_full[node_id_item][timestamp_item] = structured_contribs[0]
+        C_message_trace_full[node_id_item][timestamp_item] = trace_infos[0]
+      else:
+        C_message_full[node_id_item][timestamp_item] = structured_contribs
+        C_message_trace_full[node_id_item][timestamp_item] = trace_infos
 
       C_memory_full[node_id_item][timestamp_item] = C_updated_memory[i]  # [1, hidden_dim]
-
-      C_message_trace_full[node_id_item][timestamp_item]=edge_info_list[i]
 
 
 
@@ -211,8 +235,6 @@ class RNNMemoryUpdater(SequenceMemoryUpdater):
 
 def get_memory_updater(module_type, memory, message_dimension, memory_dimension, device):
   if module_type == "gru":
-    print('yes gru')
     return GRUMemoryUpdater(memory, message_dimension, memory_dimension, device)
   elif module_type == "rnn":
-    print('yes rnn')
     return RNNMemoryUpdater(memory, message_dimension, memory_dimension, device)

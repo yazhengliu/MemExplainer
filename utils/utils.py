@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 
+DEBUG_VERBOSE = False
+
 
 class MergeLayer(torch.nn.Module):
   def __init__(self, dim1, dim2, dim3, dim4):
@@ -44,26 +46,11 @@ class MergeLayer(torch.nn.Module):
       # phi =Z / (den+1e-4)
 
       C = phi
-      print('phi',phi.shape)
       # print(phi.sum(dim=(1)))
       #
 
 
       ok_mask = torch.isclose(phi.sum(dim=1), torch.ones_like(phi.sum(dim=1)), atol=1e-4)
-      print("全部匹配吗:", ok_mask.all().item())
-      if not ok_mask.all():
-          # 获取不匹配的 (batch_idx, out_idx) 坐标
-          mismatch_coords = (~ok_mask).nonzero(as_tuple=False)  # [N_mismatch, 2]
-          print("不匹配坐标:\n", mismatch_coords)
-
-          # 还可以查看这些位置的值对比
-          for b_idx, o_idx in mismatch_coords:
-              pred_val = C.sum(dim=1)[b_idx, o_idx].item()
-              true_val = out[b_idx, o_idx].item()
-              diff = pred_val - true_val
-              print(f"[b={b_idx}, o={o_idx}] 预测={pred_val:.6f}, 真值={true_val:.6f}, 差值={diff:.6e}")
-
-
       return phi
 
   def merge_contribution(self, x1, x2):
@@ -128,11 +115,6 @@ class MergeLayer(torch.nn.Module):
     # print('x2_sum', x2_sum)
 
     total_contrib = x1_sum + x2_sum
-
-    print('total_contrib',total_contrib.shape)
-    print('final_output',final_output.shape)
-
-    print(f"MergeLayer贡献守恒验证: {torch.allclose(total_contrib, final_output, atol=1e-4)}")
 
     return final_output,x1_contributions, x2_contributions
 
@@ -315,7 +297,8 @@ class MLP(torch.nn.Module):
 
     # print(f"输入贡献总和: {final_contrib_sum}")
     # print(f"最终输出: {final_output}")
-    print(f"贡献守恒验证: {torch.allclose(final_contrib_sum, final_output, atol=1e-4)}")
+    if DEBUG_VERBOSE:
+      print(f"贡献守恒验证: {torch.allclose(final_contrib_sum, final_output, atol=1e-4)}")
 
     difference = torch.abs(final_contrib_sum - final_output)
     max_diff = torch.max(difference)
@@ -355,227 +338,6 @@ class MLP(torch.nn.Module):
 
     return output, contributions
 
-class MLP_geography(torch.nn.Module):
-  def __init__(self, dim, out_dim,drop=0.3,):
-    super().__init__()
-    self.fc_1 = torch.nn.Linear(dim, out_dim)
-    # self.fc_2 = torch.nn.Linear(dim, dim)
-    # self.fc_3 = torch.nn.Linear(dim, out_dim)
-    self.act = torch.nn.ReLU()
-    self.dropout = torch.nn.Dropout(p=drop, inplace=False)
-
-  def forward(self, x):
-    if x.dtype != self.fc_1.weight.dtype:
-      x = x.to(dtype=self.fc_1.weight.dtype)
-
-    # x = self.act(self.fc_1(x))
-    # x = self.dropout(x)
-    # x = self.act(self.fc_2(x))
-    # x = self.dropout(x)
-    # # print('x',self.fc_3(x))
-    # # print('out_put',self.fc_3(x).squeeze(dim=1))
-    # return self.act(self.fc_1(x)).squeeze(dim=1)
-    return torch.sigmoid(self.fc_1(x)).squeeze(dim=1)
-
-  def linear_contribution(self,weight,input,out):
-      Z = input.unsqueeze(2) * weight.unsqueeze(0)
-      S = Z.sum(dim=1)  # [B, D_out]  分母
-
-      den = S.unsqueeze(1)  # [B, 1, D_out] 便于广播
-      phi = torch.where(den != 0, Z / den, torch.zeros_like(Z))  # 分母为0 → 0
-
-      C = phi
-
-      # ok_mask = torch.isclose(C.sum(dim=1), out, atol=1e-4)
-      # print("全部匹配吗:", ok_mask.all().item())
-      # if not ok_mask.all():
-      #     # 获取不匹配的 (batch_idx, out_idx) 坐标
-      #     mismatch_coords = (~ok_mask).nonzero(as_tuple=False)  # [N_mismatch, 2]
-      #     print("不匹配坐标:\n", mismatch_coords)
-      #
-      #     # 还可以查看这些位置的值对比
-      #     for b_idx, o_idx in mismatch_coords:
-      #         pred_val = C.sum(dim=1)[b_idx, o_idx].item()
-      #         true_val = out[b_idx, o_idx].item()
-      #         diff = pred_val - true_val
-      #         print(f"[b={b_idx}, o={o_idx}] 预测={pred_val:.6f}, 真值={true_val:.6f}, 差值={diff:.6e}")
-      #
-      # # print(C.sum(dim=1))
-      # #
-      # # print(out)
-      #
-      # # print('linear 1',torch.allclose(C.sum(dim=1), out, atol=1e-4))
-      return C
-
-
-
-
-
-  def compute_contributions(self, x):
-    """
-    计算整个MLP的贡献分配（不考虑dropout）
-
-    Args:
-        x: 输入张量 [batch_size, input_dim]
-
-    Returns:
-        input_contributions: 输入对最终输出的贡献 [batch_size, input_dim, 1]
-    """
-    batch_size = x.shape[0]
-
-    self.fc_1.weight.data = self.fc_1.weight.to(dtype=torch.float64)
-    self.fc_2.weight.data = self.fc_2.weight.to(dtype=torch.float64)
-    self.fc_3.weight.data = self.fc_3.weight.to(dtype=torch.float64)
-    if self.fc_1.bias is not None:
-      self.fc_1.bias.data = self.fc_1.bias.data.to(dtype=torch.float64)
-    if self.fc_2.bias is not None:
-      self.fc_2.bias.data = self.fc_2.bias.data.to(dtype=torch.float64)
-    if self.fc_3.bias is not None:
-      self.fc_3.bias.data = self.fc_3.bias.data.to(dtype=torch.float64)
-
-    x = x.to(dtype=torch.float64)
-
-    # if x.dtype != self.fc_1.weight.dtype:
-    #   x = x.to(dtype=self.fc_1.weight.dtype)
-
-    B, Din = x.shape
-
-    # 前向传播，保存中间结果（跳过dropout）
-    h1 = self.fc_1(x)  # [B, 80]
-    h1_act = self.act(h1)  # [B, 80]
-
-    h2 = self.fc_2(h1_act)  # [B, 10]
-    h2_act = self.act(h2)  # [B, 10]
-
-    output = self.fc_3(h2_act)  # [B, 1]
-    final_output = output.squeeze(dim=1)  # [B]
-
-    # 计算各层的贡献
-    # 第3层：h2_act -> output
-    C_layer3 = self.linear_contribution(self.fc_3.weight.t(), h2_act, output)  # [B, 10, 1]
-
-    # print('C_layer3.shape',C_layer3.shape)
-
-    # 第2层：h1_act -> h2
-    C_layer2 = self.linear_contribution(self.fc_2.weight.t(), h1_act, h2)  # [B, 80, 10]
-
-    # print('C_layer2.shape', C_layer2.shape)
-
-    # 第1层：x -> h1
-    C_layer1 = self.linear_contribution(self.fc_1.weight.t(), x, h1)  # [B, input_dim, 80]
-
-    # print('C_layer1.shape', C_layer1.shape)
-
-    # 计算输入对最终输出的贡献（链式法则）
-    # C_layer1: [B, input_dim, 80] -> 输入对h1的贡献
-    # C_layer2: [B, 80, 10] -> h1对h2的贡献
-    # C_layer3: [B, 10, 1] -> h2对输出的贡献
-
-    # 计算输入对h2的贡献
-    # [B, input_dim, 80] @ [B, 80, 10] = [B, input_dim, 10]
-    input_to_h2 = torch.bmm(C_layer1, C_layer2)
-
-    # 计算输入对最终输出的贡献
-    # [B, input_dim, 10] @ [B, 10, 1] = [B, input_dim, 1]
-    input_to_output = torch.bmm(input_to_h2, C_layer3)
-
-    # print(input_to_output.shape)
-    # print(final_output.shape)
-
-    input_to_output = input_to_output * final_output.unsqueeze(1)
-
-    # print(input_to_output.shape)
-    #
-    # print(final_output.shape)
-
-    # 验证最终贡献守恒
-    final_contrib_sum = input_to_output.sum(dim=1).squeeze(-1)  # [B]
-
-
-    # print(f"输入贡献总和: {final_contrib_sum}")
-    # print(f"最终输出: {final_output}")
-    print(f"贡献守恒验证: {torch.allclose(final_contrib_sum, final_output, atol=1e-4)}")
-
-    difference = torch.abs(final_contrib_sum - final_output)
-    max_diff = torch.max(difference)
-    mean_diff = torch.mean(difference)
-    # print(f"最大差异: {max_diff.item():.6f}")
-    # print(f"平均差异: {mean_diff.item():.6f}")
-    # print(f"差异范围: [{torch.min(difference).item():.6f}, {max_diff.item():.6f}]")
-
-    return input_to_output  # [B, input_dim, 1]
-
-  def forward_with_contributions(self, x,model):
-    """
-    前向传播并计算贡献（不考虑dropout）
-
-    Args:
-        x: 输入张量 [batch_size, input_dim]
-
-    Returns:
-        output: 最终输出 [batch_size]
-        contributions: 输入贡献 [batch_size, input_dim, 1]
-    """
-    # 临时禁用dropout
-    self.dropout.eval()
-
-    if x.dtype != self.fc_1.weight.dtype:
-      x = x.to(dtype=self.fc_1.weight.dtype)
-
-    # 计算输出和贡献
-    output = self.forward(x)
-    contributions = self.compute_contributions(x)
-
-    # contrib_edge_total, contrib_edge_input = self.edge_contrib_from_dict(model, edge_dict)
-
-
-    # 恢复dropout训练模式
-    # self.dropout.train()
-
-    return output, contributions
-
-class MLP_geography_v2(torch.nn.Module):
-    def __init__(self, dim, out_dim, drop=0.3):
-      super().__init__()
-      hidden_dim = dim * 2
-      self.fc_1 = torch.nn.Linear(dim, hidden_dim)
-      self.fc_2 = torch.nn.Linear(hidden_dim, hidden_dim // 2)
-      self.fc_3 = torch.nn.Linear(hidden_dim // 2, out_dim)
-      self.act = torch.nn.ReLU()
-      self.dropout = torch.nn.Dropout(p=drop)
-
-    def forward(self, x):
-      if x.dtype != self.fc_1.weight.dtype:
-        x = x.to(dtype=self.fc_1.weight.dtype)
-      x = self.act(self.fc_1(x))
-      x = self.dropout(x)
-      x = self.act(self.fc_2(x))
-      x = self.dropout(x)
-      # 不使用 sigmoid，直接输出并 clamp
-      # return torch.clamp(self.fc_3(x), 0.0, 1.0).squeeze(dim=1)
-      return self.fc_3(x).squeeze(dim=1)
-
-
-class MLP_geography_v3(torch.nn.Module):
-  def __init__(self, dim, out_dim, drop=0.3):
-    super().__init__()
-    hidden_dim = dim * 2
-    self.fc_1 = torch.nn.Linear(dim, hidden_dim)
-    self.fc_2 = torch.nn.Linear(hidden_dim, hidden_dim // 2)
-    self.fc_3 = torch.nn.Linear(hidden_dim // 2, out_dim)
-    self.act = torch.nn.ReLU()
-    self.dropout = torch.nn.Dropout(p=drop)
-
-  def forward(self, x):
-    if x.dtype != self.fc_1.weight.dtype:
-      x = x.to(dtype=self.fc_1.weight.dtype)
-    x = self.act(self.fc_1(x))
-    x = self.dropout(x)
-    x = self.act(self.fc_2(x))
-    x = self.dropout(x)
-    # 不使用 sigmoid，直接输出并 clamp
-    # return torch.clamp(self.fc_3(x), 0.0, 1.0).squeeze(dim=1)
-    return torch.sigmoid(self.fc_3(x)).squeeze(dim=1)
 
 class EarlyStopMonitor(object):
   def __init__(self, max_round=3, higher_better=True, tolerance=1e-10):
@@ -760,18 +522,3 @@ class NeighborFinder:
 
     return (node_records, eidx_records, t_records)
 
-class MLP_video(torch.nn.Module):
-    def __init__(self, dim, out_dim, drop=0.3, ):
-      super().__init__()
-      self.fc_1 = torch.nn.Linear(dim, dim)
-      self.fc_2 = torch.nn.Linear(dim, out_dim)
-      self.act = torch.nn.ReLU()
-      self.dropout = torch.nn.Dropout(p=drop, inplace=False)
-
-    def forward(self, x):
-      if x.dtype != self.fc_1.weight.dtype:
-        x = x.to(dtype=self.fc_1.weight.dtype)
-
-      x = self.act(self.fc_1(x))
-      x = self.dropout(x)
-      return self.fc_2(x).squeeze(dim=1)

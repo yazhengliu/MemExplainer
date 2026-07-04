@@ -5,8 +5,9 @@ import time
 import argparse
 import sys
 import logging
+import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 
 import joblib
 import numpy as np
@@ -16,6 +17,26 @@ import torch.nn as nn
 from model.tgn import TGN
 from utils.prepare_video_data import TemporalGraphDataLoader
 from utils.utils import MLP
+
+
+def load_config(config_path: str) -> Dict[str, Any]:
+    if not config_path:
+        return {}
+    if not os.path.exists(config_path):
+        return {}
+    with open(config_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def apply_config_defaults(parser: argparse.ArgumentParser, config: Dict[str, Any]) -> Dict[str, Any]:
+    valid_dests = {action.dest for action in parser._actions}
+    config_defaults = {key: value for key, value in config.items() if key in valid_dests}
+    unknown_keys = sorted(set(config.keys()) - valid_dests)
+    if unknown_keys:
+        print(f'警告: 配置文件中存在未使用的参数: {unknown_keys}')
+    if config_defaults:
+        parser.set_defaults(**config_defaults)
+    return config_defaults
 
 
 def load_all_videos_no_split(root_dir: str, classes_list=None):
@@ -203,14 +224,16 @@ class NodeFeatureProjector(nn.Module):
 
 def build_common_parser():
     parser = argparse.ArgumentParser('TGN Video Classification Training')
-    parser.add_argument('--dataset', type=str, choices=['penn', 'hmdb'], required=True)
+    parser.add_argument('--config', type=str, default='configs/train_video_penn.json',
+                        help='Path to a JSON config file. Config values override parser defaults.')
+    parser.add_argument('--dataset', type=str, choices=['penn', 'hmdb'], default='penn')
     parser.add_argument('-d', '--data', type=str, default=None, help='Dataset root directory')
     parser.add_argument('--bs', type=int, default=50, help='Batch_size')
     parser.add_argument('--prefix', type=str, default=None, help='Prefix to name the checkpoints')
     parser.add_argument('--n_degree', type=int, default=10, help='Number of neighbors to sample')
     parser.add_argument('--n_head', type=int, default=2, help='Number of heads used in attention layer')
     parser.add_argument('--n_epoch', type=int, default=200, help='Number of epochs')
-    parser.add_argument('--n_layer', type=int, default=1, help='Number of network layers')
+    parser.add_argument('--n_layer', type=int, default=2, help='Number of network layers')
     parser.add_argument('--lr', type=float, default=0.001, help='Learning rate')
     parser.add_argument('--patience', type=int, default=5, help='Patience for early stopping')
     parser.add_argument('--n_runs', type=int, default=1, help='Number of runs')
@@ -219,33 +242,37 @@ def build_common_parser():
     parser.add_argument('--node_dim', type=int, default=100, help='Dimensions of the node embedding')
     parser.add_argument('--time_dim', type=int, default=100, help='Dimensions of the time embedding')
     parser.add_argument('--backprop_every', type=int, default=1, help='Every how many batches to backprop')
-    parser.add_argument('--use_memory', action='store_true', default='True',
+    parser.add_argument('--use_memory', action=argparse.BooleanOptionalAction, default=True,
                         help='Whether to augment the model with a node memory')
+    parser.add_argument('--memory_updater', type=str, default="gru", choices=[
+        "gru", "rnn"], help='Type of memory updater')
     parser.add_argument('--embedding_module', type=str, default="graph_sum",
                         choices=["graph_attention", "graph_sum", "identity", "time"],
                         help='Type of embedding module')
     parser.add_argument('--message_function', type=str, default="identity",
                         choices=["mlp", "identity"], help='Type of message function')
-    parser.add_argument('--aggregator', type=str, default="last", help='Type of message aggregator')
-    parser.add_argument('--memory_update_at_end', action='store_true',
+    parser.add_argument('--aggregator', type=str, default="last", choices=["last", "mean"],
+                        help='Type of message aggregator')
+    parser.add_argument('--memory_update_at_end', action=argparse.BooleanOptionalAction, default=False,
                         help='Whether to update memory at the end or at the start of the batch')
     parser.add_argument('--message_dim', type=int, default=None)
     parser.add_argument('--memory_dim', type=int, default=None)
-    parser.add_argument('--different_new_nodes', action='store_true',
+    parser.add_argument('--different_new_nodes', action=argparse.BooleanOptionalAction, default=False,
                         help='Whether to use disjoint set of new nodes for train and val')
-    parser.add_argument('--uniform', action='store_true',
+    parser.add_argument('--uniform', action=argparse.BooleanOptionalAction, default=False,
                         help='take uniform sampling from temporal neighbors')
-    parser.add_argument('--randomize_features', action='store_true',
+    parser.add_argument('--randomize_features', action=argparse.BooleanOptionalAction, default=False,
                         help='Whether to randomize node features')
-    parser.add_argument('--use_destination_embedding_in_message', action='store_true',
+    parser.add_argument('--use_destination_embedding_in_message', action=argparse.BooleanOptionalAction, default=False,
                         help='Whether to use the embedding of the destination node as part of the message')
-    parser.add_argument('--use_source_embedding_in_message', action='store_true',
+    parser.add_argument('--use_source_embedding_in_message', action=argparse.BooleanOptionalAction, default=False,
                         help='Whether to use the embedding of the source node as part of the message')
     parser.add_argument('--n_neg', type=int, default=1)
-    parser.add_argument('--use_validation', action='store_true',
+    parser.add_argument('--use_validation', action=argparse.BooleanOptionalAction, default=False,
                         help='Whether to use a validation set')
-    parser.add_argument('--new_node', action='store_true', help='model new node')
+    parser.add_argument('--new_node', action=argparse.BooleanOptionalAction, default=False, help='model new node')
     parser.add_argument('--train_T', type=int, default=4, help='Window size for training')
+
     return parser
 
 
@@ -329,6 +356,13 @@ def setup_logging(args, spec, model_save_path, decoder_save_path):
 
 
 def resolve_runtime_config(args, spec):
+    base_prefix = args.prefix if args.prefix is not None else spec['default_prefix']
+    embedding_layer_suffix = f"_{args.embedding_module}_l{args.n_layer}"
+    prefix = (
+        base_prefix
+        if base_prefix.endswith(embedding_layer_suffix)
+        else f"{base_prefix}{embedding_layer_suffix}"
+    )
     resolved = {
         'BATCH_SIZE': args.bs,
         'NUM_NEIGHBORS': args.n_degree,
@@ -350,14 +384,17 @@ def resolve_runtime_config(args, spec):
         'MESSAGE_DIM': args.message_dim if args.message_dim is not None else spec['default_message_dim'],
         'MEMORY_DIM': args.memory_dim if args.memory_dim is not None else spec['default_memory_dim'],
         'TRAIN_T': args.train_T,
-        'PREFIX': args.prefix if args.prefix is not None else spec['default_prefix'],
+        'PREFIX': prefix,
     }
-    resolved['MODEL_SAVE_PATH'] = f"./saved_models/{resolved['PREFIX']}-tgn-classification.pth"
-    resolved['DECODER_SAVE_PATH'] = f"./saved_models/{resolved['PREFIX']}-decoder-classification.pth"
-    resolved['NODE_PROJECTOR_SAVE_PATH'] = f"./saved_models/{resolved['PREFIX']}-node_projector.pth"
-    resolved['EDGE_PROJECTOR_SAVE_PATH'] = f"./saved_models/{resolved['PREFIX']}-edge_projector.pth"
+    resolved['RUN_NAME'] = (
+        f"{resolved['PREFIX']}_{args.memory_updater}_{args.aggregator}_{args.message_function}"
+    )
+    resolved['MODEL_SAVE_PATH'] = f"./saved_models/{resolved['RUN_NAME']}-tgn-classification.pth"
+    resolved['DECODER_SAVE_PATH'] = f"./saved_models/{resolved['RUN_NAME']}-decoder-classification.pth"
+    resolved['NODE_PROJECTOR_SAVE_PATH'] = f"./saved_models/{resolved['RUN_NAME']}-node_projector.pth"
+    resolved['EDGE_PROJECTOR_SAVE_PATH'] = f"./saved_models/{resolved['RUN_NAME']}-edge_projector.pth"
     resolved['get_checkpoint_path'] = lambda epoch: (
-        f"./saved_checkpoints/{resolved['PREFIX']}-{epoch}-classification.pth"
+        f"./saved_checkpoints/{resolved['RUN_NAME']}-{epoch}-classification.pth"
     )
     return resolved
 
@@ -485,6 +522,7 @@ def initialize_model_state(args, spec, runtime_cfg, train_data, device):
         message_dimension=runtime_cfg['MESSAGE_DIM'],
         memory_dimension=runtime_cfg['MEMORY_DIM'],
         memory_update_at_start=not args.memory_update_at_end,
+        memory_updater_type=args.memory_updater,
         embedding_module_type=args.embedding_module,
         message_function=args.message_function,
         aggregator_type=args.aggregator,
@@ -643,6 +681,13 @@ def run_training_loop(args, spec, runtime_cfg, dataset_state, model_state, devic
             cls = key.split('/')[0]
             label = class_to_label[cls]
             label_t = torch.tensor([label], dtype=torch.long, device=device)
+            windows = make_windows(batches, runtime_cfg['TRAIN_T'])
+            print(
+                f"Epoch {epoch + 1}/{runtime_cfg['NUM_EPOCH']} | "
+                f"Video {video_idx + 1}/{len(train_items)} | "
+                f"key={key} | class={cls} | label={label} | "
+                f"frames={len(batches)} | windows={len(windows)}"
+            )
 
             builder = TemporalGraphDataLoader(device=device)
             tgn.neighbor_finder = builder.create_neighbor_finder(batches)
@@ -663,7 +708,6 @@ def run_training_loop(args, spec, runtime_cfg, dataset_state, model_state, devic
             if tgn.use_memory:
                 tgn.memory.__init_memory__()
 
-            windows = make_windows(batches, runtime_cfg['TRAIN_T'])
             for window in windows:
                 super_batch = build_window_super_batch_dynamic_edges(window)
 
@@ -769,15 +813,24 @@ def run_dataset(args):
     dataset_state['train_data'] = filtered_train_data
     dataset_state['video_global_edge_features'] = video_global_edge_features
 
+    print('training...')
+
     run_training_loop(args, spec, runtime_cfg, dataset_state, model_state, device)
 
 
 if __name__ == "__main__":
     parser = build_common_parser()
+    config_probe, _ = parser.parse_known_args()
+    config = load_config(config_probe.config)
+    loaded_config_defaults = apply_config_defaults(parser, config)
+
     try:
         args = parser.parse_args()
     except:
         parser.print_help()
         sys.exit(0)
+
+    if loaded_config_defaults:
+        print(f'Loaded config from {args.config}: {sorted(loaded_config_defaults.keys())}')
 
     run_dataset(args)

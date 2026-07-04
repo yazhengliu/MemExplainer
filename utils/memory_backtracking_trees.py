@@ -1,9 +1,9 @@
-from dataclasses import dataclass
 import math
-import os
-import pickle
+import time
 import torch
 from typing import Dict, Tuple, List, Any, Optional
+
+DEBUG_VERBOSE = False
 
 def _sorted_times(d: Dict[float, Any]) -> List[float]:
     # d: {timestamp: record}
@@ -24,160 +24,148 @@ def _find_time_for_expand(times: List[float], threshold: Optional[float], is_roo
             return t
     return None
 
-@dataclass
-class TreeNode:
-    node: int
-    t: float
-    side: Optional[str] = None          # 'L' / 'R' / None(根)
-    left: Optional["TreeNode"] = None   # source child
-    right: Optional["TreeNode"] = None  # destination child
+def _as_records(entry: Any) -> List[Dict[str, Any]]:
+    return entry if isinstance(entry, list) else [entry]
 
-def build_backtrace_tree(
+def aggregate_backtrace_contributions_cached(
     message_dict: Dict[int, Dict[float, Dict[str, Any]]],
     root_node: int,
+    max_depth: int,
     start_time: Optional[float] = None,
-    max_depth: int = 10,                 # 根为0层，最多展开到 max_depth 层（不含超过的层）
-) -> Optional[TreeNode]:
+    child_prune_ratio: float = 1.0,
+    progress_every: int = 1000,
+    verbose: bool = False,
+) -> Dict[int, torch.Tensor]:
+    """
+    Aggregate edge contribution matrices without materializing the full backtrace tree.
+
+    For each node update record:
+      contribution(node) =
+        edge +
+        contribution(source_child) @ source_node_contribution +
+        contribution(destination_child) @ destination_node_contribution
+
+    This is equivalent to the explicit tree traversal, but memoizes repeated
+    (node, time-threshold, remaining-depth) subproblems.
+    """
     if root_node not in message_dict:
-        return None
+        return {}
+    if child_prune_ratio <= 0 or child_prune_ratio > 1:
+        raise ValueError(f"child_prune_ratio must be in (0, 1], got {child_prune_ratio}")
 
-    times_root = _sorted_times(message_dict[root_node])
-    if not times_root:
-        return None
+    times_cache: Dict[int, List[float]] = {}
+    memo: Dict[Tuple[int, Optional[float], int, bool], Dict[int, torch.Tensor]] = {}
+    stats = {
+        'calls': 0,
+        'cache_hits': 0,
+        'records': 0,
+        'pruned_records': 0,
+        'start_time': time.perf_counter(),
+    }
 
-    is_root = start_time is None
-    t0 = _find_time_for_expand(times_root, start_time, is_root=True) if is_root \
-         else _find_time_for_expand(times_root, start_time, is_root=False)
-    if t0 is None:
-        return None
+    def get_times(node_id: int) -> List[float]:
+        if node_id not in times_cache:
+            times_cache[node_id] = _sorted_times(message_dict.get(node_id, {}))
+        return times_cache[node_id]
 
-    # 根节点，side=None，根层=0
-    root = TreeNode(root_node, t0, side=None)
+    def clone_agg(agg: Dict[int, torch.Tensor]) -> Dict[int, torch.Tensor]:
+        return {edge_idx: mat.clone() for edge_idx, mat in agg.items()}
 
-    def expand(node: TreeNode, is_root_flag: bool, depth: int):
-        # 超过或等于最大层数则不再扩展（根为0层）
-        if depth >= max_depth:
-            return
-
-        node_times = _sorted_times(message_dict.get(node.node, {}))
-        if not node_times:
-            return
-
-        t_use = _find_time_for_expand(node_times, node.t, is_root=is_root_flag)
-        if t_use is None:
-            return
-
-        rec = message_dict[node.node][t_use]
-        s = int(rec['source_node'])
-        d = int(rec['destination_node'])
-
-        # 左=source，右=dest，并标记 side
-        node.left = TreeNode(s, t_use, side="L")
-        node.right = TreeNode(d, t_use, side="R")
-
-        # 继续向下扩展，深度+1
-        if s in message_dict:
-            expand(node.left, is_root_flag=False, depth=depth + 1)
-        if d in message_dict:
-            expand(node.right, is_root_flag=False, depth=depth + 1)
-
-    # 从根开始，根深度视为 0
-    expand(root, is_root_flag=True, depth=0)
-    return root
-
-def compute_layer_contributions_bottom_up(
-    message_dict: Dict[int, Dict[float, Dict[str, Any]]],
-    root: TreeNode,
-) -> List[Tuple[int, torch.Tensor]]:
-    """
-    按“层次”输出各层贡献矩阵，但每层的矩阵由“自下向上”的乘法链构成：
-      result(L,R) = edge(L,t) @ C_parent @ C_grandparent @ ... @ C_root
-    其中 C_* 的选择由到达该层的分支轨迹（L/R）决定：
-      若此层是父层的左分支 -> 用父层 L 的 source_node_contribution
-      若此层是父层的右分支 -> 用父层 L 的 destination_node_contribution
-    返回 [(层描述, 矩阵)]，先左支层序、后右支层序。
-    """
-    if root.left is None or root.right is None:
-        raise ValueError("root 缺少左右子，无法形成第一层 (L, R)。")
-
-    n, dtype, device = _infer_shape_dtype_device(message_dict)
-    # print('dtype',dtype)
-    I = torch.eye(n, dtype=torch.float64, device=device)
-    results: List[Tuple[str, torch.Tensor]] = []
-
-    def layer_name(L: TreeNode, R: TreeNode) -> str:
-        tL = int(L.t) if float(L.t).is_integer() else L.t
-        tR = int(R.t) if float(R.t).is_integer() else R.t
-        return f"L─ {L.node}({tL}) | R─ {R.node}({tR})"
-
-    # ancestors 记录从“第一层(根层)”到“当前层的父层”为止的分支轨迹：
-    # 列表元素是 (ancestor_L_node_id, ancestor_time, branch_taken) 其中 branch_taken ∈ {'L','R'}
-    def visit_layer(L: Optional[TreeNode], R: Optional[TreeNode],
-                    ancestors: List[Tuple[int, float, str]]):
-        if L is None or R is None:
-            return
-
-        # 1) 计算右侧连乘：按“近祖先→远祖先”的顺序右乘
-        right_chain = I
-        # ancestors 是从根层到当前父层的顺序；最后一个就是“最近的父层”
-        for anc_node_id, anc_t, branch in reversed(ancestors):
-            anc_entry = _get_entry(message_dict, anc_node_id, anc_t)
-            contrib = (anc_entry["source_node_contribution"]
-                       if branch == 'L' else
-                       anc_entry["destination_node_contribution"])
-            contrib = contrib.to(torch.float64)
-
-            right_chain = right_chain @ contrib
-
-            right_chain=right_chain.to(torch.float64)
-
-        # 2) 当前层 edge 在最左，形成：edge(L,t) @ right_chain
-        entry = _get_entry(message_dict, L.node, L.t)
-        edge = entry["edge"]
-        edge_idx=int(entry['edge_idx'])
-        # print('type edge ',type(edge))
-        # print('type right',type(right_chain))
-        edge=edge.to(torch.float64)
-        current = edge @ right_chain
-        results.append((edge_idx, current))
-
-        # 3) 继续往下一层（两条支路）
-        # 左支下一层由 (L.left, L.right) 组成；祖先新增 (当前层 L, 'L')
-        if L.left is not None and L.right is not None:
-            anc_left = ancestors + [(L.node, L.t, 'L')]
-            visit_layer(L.left, L.right, anc_left)
-
-        # 右支下一层由 (R.left, R.right) 组成；祖先新增 (当前层 L, 'R')
-        if R.left is not None and R.right is not None:
-            anc_right = ancestors + [(L.node, L.t, 'R')]
-            visit_layer(R.left, R.right, anc_right)
-
-    # 第一层（根层）没有祖先
-    visit_layer(root.left, root.right, ancestors=[])
-    return results
-
-def aggregate_layers_by_edge(layers: List[Tuple[int, torch.Tensor]]) -> Dict[int, torch.Tensor]:
-    agg: Dict[int, torch.Tensor] = {}
-    for edge_idx, mat in layers:
+    def add_to_agg(agg: Dict[int, torch.Tensor], edge_idx: int, mat: torch.Tensor):
         if edge_idx in agg:
             agg[edge_idx] = agg[edge_idx] + mat
         else:
             agg[edge_idx] = mat.clone()
-    return agg
 
-def _infer_shape_dtype_device(message_dict: Dict[int, Dict[float, Dict[str, Any]]]) -> Tuple[int, torch.dtype, torch.device]:
-    for tdict in message_dict.values():
-        for rec in tdict.values():
-            M = rec["edge"]
-            return M.shape[-1], M.dtype, M.device
-    raise ValueError("message_dict 为空，无法推断矩阵维度/设备。")
+    def merge_child(
+        agg: Dict[int, torch.Tensor],
+        child_agg: Dict[int, torch.Tensor],
+        chain: torch.Tensor,
+    ):
+        chain = chain.to(torch.float64)
+        for child_edge_idx, child_mat in child_agg.items():
+            add_to_agg(agg, child_edge_idx, child_mat.to(torch.float64) @ chain)
 
-def _get_entry(message_dict, nid: int, t: float) -> Dict[str, Any]:
-    try:
-        return message_dict[nid][t]
-    except KeyError:
-        raise KeyError(f"message_dict 中缺少键：node={nid}, time={t}")
+    def record_indices_to_expand(records: List[Dict[str, Any]]) -> set:
+        if child_prune_ratio >= 1.0 or len(records) <= 1:
+            return set(range(len(records)))
+        keep_count = max(1, int(math.ceil(child_prune_ratio * len(records))))
+        scored = []
+        for rec_idx, rec in enumerate(records):
+            source_score = rec['source_node_contribution'].detach().sum()
+            destination_score = rec['destination_node_contribution'].detach().sum()
+            score = float((source_score + destination_score).cpu())
+            scored.append((score, rec_idx))
+        scored.sort(reverse=True)
+        return {rec_idx for _, rec_idx in scored[:keep_count]}
 
+    def solve(node_id: int, threshold: Optional[float], remaining_depth: int, is_root: bool) -> Dict[int, torch.Tensor]:
+        if remaining_depth <= 0 or node_id not in message_dict:
+            return {}
+
+        key = (int(node_id), None if threshold is None else float(threshold), int(remaining_depth), bool(is_root))
+        if key in memo:
+            stats['cache_hits'] += 1
+            return clone_agg(memo[key])
+
+        stats['calls'] += 1
+        if verbose and stats['calls'] % progress_every == 0:
+            print(
+                f'[backtrace-cached] calls={stats["calls"]} cache_hits={stats["cache_hits"]} '
+                f'records={stats["records"]} pruned_records={stats["pruned_records"]} '
+                f'memo_size={len(memo)} node={node_id} '
+                f'remaining_depth={remaining_depth} elapsed={time.perf_counter() - stats["start_time"]:.3f}s',
+                flush=True
+            )
+
+        times = get_times(node_id)
+        t_use = _find_time_for_expand(times, threshold, is_root=is_root)
+        if t_use is None:
+            memo[key] = {}
+            return {}
+
+        result: Dict[int, torch.Tensor] = {}
+        records = _as_records(message_dict[node_id][t_use])
+        expand_record_indices = record_indices_to_expand(records)
+
+        for rec_idx, rec in enumerate(records):
+            stats['records'] += 1
+            edge_idx = int(rec['edge_idx'])
+            edge = rec['edge'].to(torch.float64)
+            add_to_agg(result, edge_idx, edge)
+
+            if remaining_depth <= 1:
+                continue
+            if rec_idx not in expand_record_indices:
+                stats['pruned_records'] += 1
+                continue
+
+            source_node = int(rec['source_node'])
+            destination_node = int(rec['destination_node'])
+
+            source_child = solve(source_node, t_use, remaining_depth - 1, False)
+            if source_child:
+                merge_child(result, source_child, rec['source_node_contribution'])
+
+            destination_child = solve(destination_node, t_use, remaining_depth - 1, False)
+            if destination_child:
+                merge_child(result, destination_child, rec['destination_node_contribution'])
+
+        memo[key] = clone_agg(result)
+        return result
+
+    root_threshold = start_time
+    aggregated = solve(root_node, root_threshold, max_depth, start_time is None)
+    if verbose:
+        print(
+            f'[backtrace-cached] done root_node={root_node} n_edges={len(aggregated)} '
+            f'calls={stats["calls"]} cache_hits={stats["cache_hits"]} '
+            f'records={stats["records"]} pruned_records={stats["pruned_records"]} '
+            f'child_prune_ratio={child_prune_ratio} memo_size={len(memo)} '
+            f'elapsed={time.perf_counter() - stats["start_time"]:.3f}s',
+            flush=True
+        )
+    return aggregated
 
 def normalize_aggregated_contributions(aggregated):
     """

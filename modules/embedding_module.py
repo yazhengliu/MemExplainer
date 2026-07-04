@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import numpy as np
 import math
+from dataclasses import dataclass
 
 from model.temporal_attention import TemporalAttentionLayer
 import torch
@@ -9,6 +10,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from utils.utils import MergeLayer
+
+DEBUG_VERBOSE = False
 
 class CustomMultiHeadAttention(nn.Module):
     """
@@ -77,36 +80,36 @@ class CustomMultiHeadAttention(nn.Module):
             # 检查是否使用了分离的 q_proj_weight, k_proj_weight, v_proj_weight
             # 当 kdim != embed_dim 或 vdim != embed_dim 时，PyTorch 使用分离的权重
             if hasattr(pytorch_mha, 'q_proj_weight') and pytorch_mha.q_proj_weight is not None:
-                # 使用分离的 q, k, v 权重，转换为 float64
-                self.q_proj.weight.copy_(pytorch_mha.q_proj_weight.to(dtype=torch.float64))
-                self.k_proj.weight.copy_(pytorch_mha.k_proj_weight.to(dtype=torch.float64))
-                self.v_proj.weight.copy_(pytorch_mha.v_proj_weight.to(dtype=torch.float64))
+                target_dtype = torch.float64
+                self.q_proj.weight.copy_(pytorch_mha.q_proj_weight.to(dtype=target_dtype))
+                self.k_proj.weight.copy_(pytorch_mha.k_proj_weight.to(dtype=target_dtype))
+                self.v_proj.weight.copy_(pytorch_mha.v_proj_weight.to(dtype=target_dtype))
 
                 if pytorch_mha.in_proj_bias is not None:
                     embed_dim = self.embed_dim
-                    self.q_proj.bias.copy_(pytorch_mha.in_proj_bias[:embed_dim].to(dtype=torch.float64))
-                    self.k_proj.bias.copy_(pytorch_mha.in_proj_bias[embed_dim:2 * embed_dim].to(dtype=torch.float64))
-                    self.v_proj.bias.copy_(pytorch_mha.in_proj_bias[2 * embed_dim:].to(dtype=torch.float64))
+                    self.q_proj.bias.copy_(pytorch_mha.in_proj_bias[:embed_dim].to(dtype=target_dtype))
+                    self.k_proj.bias.copy_(pytorch_mha.in_proj_bias[embed_dim:2 * embed_dim].to(dtype=target_dtype))
+                    self.v_proj.bias.copy_(pytorch_mha.in_proj_bias[2 * embed_dim:].to(dtype=target_dtype))
             else:
                 # 使用合并的 in_proj_weight（当 kdim == vdim == embed_dim 时）
                 in_proj_weight = pytorch_mha.in_proj_weight  # [3 * embed_dim, embed_dim]
                 embed_dim = self.embed_dim
+                target_dtype = torch.float64
 
-                q_proj_weight = in_proj_weight[:embed_dim, :].to(dtype=torch.float64)
-                k_proj_weight = in_proj_weight[embed_dim:2 * embed_dim, :].to(dtype=torch.float64)
-                v_proj_weight = in_proj_weight[2 * embed_dim:, :].to(dtype=torch.float64)
+                q_proj_weight = in_proj_weight[:embed_dim, :].to(dtype=target_dtype)
+                k_proj_weight = in_proj_weight[embed_dim:2 * embed_dim, :].to(dtype=target_dtype)
+                v_proj_weight = in_proj_weight[2 * embed_dim:, :].to(dtype=target_dtype)
 
                 self.q_proj.weight.copy_(q_proj_weight)
                 self.k_proj.weight.copy_(k_proj_weight)
                 self.v_proj.weight.copy_(v_proj_weight)
 
                 if pytorch_mha.in_proj_bias is not None:
-                    in_proj_bias = pytorch_mha.in_proj_bias.to(dtype=torch.float64)
+                    in_proj_bias = pytorch_mha.in_proj_bias.to(dtype=target_dtype)
                     self.q_proj.bias.copy_(in_proj_bias[:embed_dim])
                     self.k_proj.bias.copy_(in_proj_bias[embed_dim:2 * embed_dim])
                     self.v_proj.bias.copy_(in_proj_bias[2 * embed_dim:])
 
-            # 复制输出投影层的权重，转换为 float64
             self.out_proj.weight.copy_(pytorch_mha.out_proj.weight.to(dtype=torch.float64))
             if pytorch_mha.out_proj.bias is not None and self.out_proj.bias is not None:
                 self.out_proj.bias.copy_(pytorch_mha.out_proj.bias.to(dtype=torch.float64))
@@ -663,10 +666,6 @@ class CustomMultiHeadAttention(nn.Module):
         model_dtype = next(self.parameters()).dtype
         model_device = next(self.parameters()).device
 
-        print('query.shape',query.shape)
-        print('key.shape', key.shape)
-        print('value.shape',value.shape)
-
         query = query.to(dtype=model_dtype, device=model_device)
         key = key.to(dtype=model_dtype, device=model_device)
         value = value.to(dtype=model_dtype, device=model_device)
@@ -675,14 +674,6 @@ class CustomMultiHeadAttention(nn.Module):
         query_bt = query.transpose(0, 1)  # [batch_size, seq_len_q, embed_dim]
         key_bt = key.transpose(0, 1)  # [batch_size, seq_len_k, kdim]
         value_bt = value.transpose(0, 1)  # [batch_size, seq_len_v, vdim]
-
-        print('################')
-
-        print('query.shape', query_bt.shape)
-        print('key.shape', key_bt.shape)
-        print('value.shape', value_bt.shape)
-
-
 
         # 线性投影
         Q = self.q_proj(query_bt)  # [batch_size, seq_len_q, embed_dim]
@@ -693,10 +684,6 @@ class CustomMultiHeadAttention(nn.Module):
         K_original = K.clone()
         V_original = V.clone()
 
-        print('Q.shape',Q.shape)
-        print('V.shape',V.shape)
-        print('K.shape', K.shape)
-
         # 重塑为多头格式
         Q = Q.view(batch_size, seq_len_q, self.num_heads, self.head_dim).transpose(1, 2)
         # [batch_size, num_heads, seq_len_q, head_dim]
@@ -705,14 +692,9 @@ class CustomMultiHeadAttention(nn.Module):
         V = V.view(batch_size, seq_len_v, self.num_heads, self.head_dim).transpose(1, 2)
         # [batch_size, num_heads, seq_len_v, head_dim]
 
-        print('Q.shape', Q.shape)
-        print('V.shape', V.shape)
-        print('K.shape', K.shape)
-
         # Scaled Dot-Product Attention
         attn_weights_pre_softmax = torch.matmul(Q, K.transpose(-2, -1)) / (self.head_dim ** 0.5)
         # [batch_size, num_heads, seq_len_q, seq_len_k]
-        print('attn_weights_pre_softmax.shape', attn_weights_pre_softmax.shape)
 
 
 
@@ -737,28 +719,19 @@ class CustomMultiHeadAttention(nn.Module):
         # Dropout
         attn_weights = self.dropout(attn_weights)
 
-        print('attn_weights.shape',attn_weights.shape)
-        print('v.shape',V.shape)
-
-
         # 计算注意力输出
         attn_output = torch.matmul(attn_weights, V)
         # [batch_size, num_heads, seq_len_q, head_dim]
 
         attn_output_multihead = attn_output.clone()
 
-        print('nomerge attn_output', attn_output.shape)
-
         # 合并所有头
         attn_output = attn_output.transpose(1, 2).contiguous().view(
             batch_size, seq_len_q, self.embed_dim
         )  # [batch_size, seq_len_q, embed_dim]
 
-        print('attn_output',attn_output.shape)
-
         # 输出投影
         output = self.out_proj(attn_output)  # [batch_size, seq_len_q, embed_dim]
-        print('before output.shape', output.shape)
 
         C_attn_to_output = self.linear_contribution_ratio(
             self.out_proj.weight,  # [embed_dim, embed_dim]
@@ -783,10 +756,6 @@ class CustomMultiHeadAttention(nn.Module):
         C_attn_to_output_multihead = C_attn_to_output_multihead.transpose(1, 2)
         # [batch_size, num_heads, seq_len_q, head_dim, embed_dim]
 
-        print('C_attn_to_output_multihead.shape', C_attn_to_output_multihead.shape)
-
-
-
         # 转换回 PyTorch 格式：[seq_len, batch_size, embed_dim]
         output = output.transpose(0, 1)  # [seq_len_q, batch_size, embed_dim]
 
@@ -797,27 +766,8 @@ class CustomMultiHeadAttention(nn.Module):
         C_attn_to_output_sum = C_attn_to_output_sum.transpose(0, 1)
         # [seq_len_q, batch_size, embed_dim]
 
-        print('C_attn_to_output_sum.shape', C_attn_to_output_sum.shape)
-        print('output.shape', output.shape)
-
-        # 验证是否相等
-        is_conserved_multihead = torch.allclose(
-            C_attn_to_output_sum,
-            output,
-            atol=1e-5,
-            rtol=1e-5
-        )
-        print(f'贡献守恒验证 (C_attn_to_output_multihead -> output): {is_conserved_multihead}')
-
-        print('after output.shape',output.shape)
-
         R_attn_output = C_attn_to_output_multihead.sum(dim=-1)
         # [batch_size, num_heads, seq_len_q, head_dim]
-
-        print('R_attn_output.shape', R_attn_output.shape)
-
-        print('attn_weights.shape',attn_weights.shape)
-        print('V',V.shape)
 
         C_attn_weights, C_V = self.matrix_multiply_contribution_ratio(
             X=attn_weights,  # [B, H, seq_len_q, seq_len_k]
@@ -827,9 +777,6 @@ class CustomMultiHeadAttention(nn.Module):
             transpose_Y=False,
             scale_factor=1.0,
         )
-        print('C_attn_weights', C_attn_weights.shape)
-        print('C_V', C_V.shape)
-        print('C_attn_to_output_multihead',C_attn_to_output_multihead.shape)
 
         C_weights_tooutput=torch.einsum('bhjdk,bhjkp->bhjdp', C_attn_weights, C_attn_to_output_multihead)
         C_V_tooutput = torch.einsum('bhjdk,bhjkp->bhjdp', C_V , C_attn_to_output_multihead)
@@ -838,8 +785,6 @@ class CustomMultiHeadAttention(nn.Module):
 
         C_V_tooutput=C_V_tooutput/2
 
-        print('C_weights_tooutput.shape',C_weights_tooutput.shape)
-        print('C_V_tooutput.shape', C_V_tooutput.shape)
 
 
         # is_conserved_attn_weights = torch.allclose(
@@ -860,8 +805,6 @@ class CustomMultiHeadAttention(nn.Module):
 
         Q_attention,K_attention=self.matrix_multiply_contribution_ratio(Q,K,attn_weights_pre_softmax,attn_weights,True, 1/self.head_dim ** 0.5)
 
-        print('Q_attention.shape',Q_attention.shape)
-        print('K_attention.shape', K_attention.shape)
 
         Q_to_output = torch.einsum('bhjdk,bhjkp->bhjdp', Q_attention, C_weights_tooutput)
         K_to_output = torch.einsum('bhjdk,bhjkp->bhjdp', K_attention, C_weights_tooutput)
@@ -870,8 +813,6 @@ class CustomMultiHeadAttention(nn.Module):
 
 
 
-        print('Q_to_output.shape', Q_to_output.shape)
-        print('K_to_output', K_to_output.shape)
 
         Q_to_output=Q_to_output/2
         K_to_output=K_to_output/2
@@ -900,23 +841,14 @@ class CustomMultiHeadAttention(nn.Module):
             query_bt,  # [batch_size, seq_len_q, embed_dim] - 输入
             Q_original  # [batch_size, seq_len_q, embed_dim] - 输出
         )
-        print('C_query_to_Q',C_query_to_Q.shape)
-#
         C_query_to_Q_multihead = C_query_to_Q.view(
             batch_size, seq_len_q, self.embed_dim, self.num_heads, self.head_dim
         )
-        print('C_query_to_Q_multihead', C_query_to_Q_multihead.shape)
 
         C_query_to_Q_multihead = C_query_to_Q_multihead.permute(0, 3, 1, 2, 4)
 
-        print('C_query_to_Q_multihead', C_query_to_Q_multihead.shape)
-
-        print('Q_to_output.shape',Q_to_output.shape)
-
 
         query_to_output = torch.einsum('bhjdk,bhjkp->bhjdp',C_query_to_Q_multihead, Q_to_output)
-
-        print('query_to_output',query_to_output.shape)
 
         # is_conserved_query = torch.allclose(
         #     query_to_output.sum(dim=(1, 2, 3)),
@@ -933,11 +865,6 @@ class CustomMultiHeadAttention(nn.Module):
             K_original  # [batch_size, seq_len_q, embed_dim] - 输出
         )
 
-        print('key_bt',key_bt.shape)
-        print('K_original', K_original.shape)
-        print('K',K.shape)
-
-        print('C_key_to_K', C_key_to_K.shape)
 
         # C_key_to_K_multihead = C_key_to_K.view(
         #     batch_size, seq_len_q, self.embed_dim, self.num_heads, self.head_dim
@@ -949,21 +876,8 @@ class CustomMultiHeadAttention(nn.Module):
             batch_size, seq_len_k, kdim, self.num_heads, self.head_dim
         )
 
-        print('C_key_to_K_multihead', C_key_to_K_multihead.shape)
-
         C_key_to_K_multihead = C_key_to_K_multihead.permute(0, 3, 1,2,4)
-        # print('C_key_to_K_multihead (after permute)', C_key_to_K_multihead.shape)
-        #
-        # print(K_to_output.shape)
-
-        print('C_key_to_K_multihead', C_key_to_K_multihead.shape)
-
-        print('K_to_output',K_to_output.shape)
-
-
-
         key_to_output = torch.einsum('bhjdk,bhjkp->bhjdp',  C_key_to_K_multihead,K_to_output)
-        print('key_to_output.shape', key_to_output.shape)
 
         # is_conserved_key = torch.allclose(
         #     key_to_output.sum(dim=(1, 2, 3)),
@@ -979,21 +893,14 @@ class CustomMultiHeadAttention(nn.Module):
             value_bt,  # [batch_size, seq_len_q, embed_dim] - 输入
             V_original  # [batch_size, seq_len_q, embed_dim] - 输出
         )
-        print('C_value_to_V', C_value_to_V.shape)
-
         vdim = value_bt.shape[2]  # 获取 kdim 的实际值
         C_value_to_V_multihead = C_value_to_V.view(
             batch_size, seq_len_k, kdim, self.num_heads, self.head_dim
         )
 
-        print('C_value_to_V_multihead',C_value_to_V_multihead.shape)
-
         C_value_to_V_multihead  = C_value_to_V_multihead.permute(0, 3, 1, 2, 4)
-        print('C_value_to_V_multihead', C_value_to_V_multihead.shape)
-        print('C_V_tooutput.shape',C_V_tooutput.shape)
 
         value_to_output = torch.einsum('bhjdk,bhjkp->bhjdp', C_value_to_V_multihead, C_V_tooutput)
-        print('value_to_output.shape', value_to_output.shape)
 
         is_conserved_value = torch.allclose(
             value_to_output.sum(dim=(1, 2, 3))+key_to_output.sum(dim=(1, 2, 3))+query_to_output.sum(dim=(1, 2, 3)),
@@ -1009,19 +916,14 @@ class CustomMultiHeadAttention(nn.Module):
         # print('query_to_output.shape', query_to_output.shape)
         # print('key_to_output.shape',key_to_output.shape)
 
-        print(f'final 验证 守恒: {is_conserved_value}')
-
         C_query=query_to_output.sum(dim=1)
         C_query=C_query.permute(1,0,2,3)
-        print('C_query',C_query.shape)
 
         C_key=key_to_output.sum(dim=1)
         C_key =C_key.permute(1,0,2,3)
-        print('C_key', C_key.shape)
 
         C_value= value_to_output.sum(dim=1)
         C_value = C_value.permute(1, 0, 2, 3)
-        print('C_value', C_value.shape)
 
         test_sum=C_value.sum(dim=(0,2)) + C_key.sum(dim=(0,2)) + C_query.sum(dim=(0,2))
 
@@ -1031,16 +933,6 @@ class CustomMultiHeadAttention(nn.Module):
             atol=1e-5,
             rtol=1e-5
         )
-
-        print(f'out  验证 守恒: {is_conserved_value}')
-
-
-
-
-
-
-
-
 
         # 处理 attention weights
         if need_weights:
@@ -1107,6 +999,7 @@ class TimeEmbedding(EmbeddingModule):
 
 
 class GraphEmbedding(EmbeddingModule):
+
   def __init__(self, node_features, edge_features, memory, neighbor_finder, time_encoder, n_layers,
                n_node_features, n_edge_features, n_time_features, embedding_dimension, device,
                n_heads=2, dropout=0.1, use_memory=True):
@@ -1190,6 +1083,97 @@ class GraphEmbedding(EmbeddingModule):
           return source_embedding
 
 
+  def compute_embedding(self, memory, source_nodes, timestamps, n_layers, n_neighbors=20, time_diffs=None,
+                        use_time_proj=True):
+    """Recursive implementation of curr_layers temporal graph attention layers.
+
+    src_idx_l [batch_size]: users / items input ids.
+    cut_time_l [batch_size]: scalar representing the instant of the time where we want to extract the user / item representation.
+    curr_layers [scalar]: number of temporal convolutional layers to stack.
+    num_neighbors [scalar]: number of temporal neighbor to consider in each convolutional layer.
+    """
+
+    assert (n_layers >= 0)
+    if DEBUG_VERBOSE:
+      print('source_nodes',len(source_nodes),source_nodes)
+
+    source_nodes_torch = torch.from_numpy(source_nodes).long().to(self.device)
+    timestamps_torch = torch.unsqueeze(torch.from_numpy(timestamps).float().to(self.device), dim=1)
+
+    # query node always has the start time -> time span == 0
+    source_nodes_time_embedding = self.time_encoder(torch.zeros_like(
+      timestamps_torch))
+
+    source_node_features = self.node_features[source_nodes_torch, :]
+    if DEBUG_VERBOSE:
+      print('source_node_features',source_node_features.shape)
+
+    if self.use_memory:
+      source_node_features = memory[source_nodes, :] + source_node_features
+      # print('memory.shape',memory.shape)
+      #
+      # print('source_node_features.shape',source_node_features.shape)
+
+
+
+    if n_layers == 0:
+      return source_node_features
+    else:
+
+      source_node_conv_embeddings = self.compute_embedding(memory,
+                                                           source_nodes,
+                                                           timestamps,
+                                                           n_layers=n_layers - 1,
+                                                           n_neighbors=n_neighbors)
+
+      if DEBUG_VERBOSE:
+        print('source_node_conv_embeddings',source_node_conv_embeddings.shape)
+
+      neighbors, edge_idxs, edge_times = self.neighbor_finder.get_temporal_neighbor(
+        source_nodes,
+        timestamps,
+        n_neighbors=n_neighbors)
+      if DEBUG_VERBOSE:
+        print('neighbors',neighbors.shape,neighbors)
+        print('edge_idxs',edge_idxs.shape ,edge_idxs)
+        print('edge_times',edge_times.shape,edge_times)
+
+
+      neighbors_torch = torch.from_numpy(neighbors).long().to(self.device)
+
+      edge_idxs = torch.from_numpy(edge_idxs).long().to(self.device)
+
+      edge_deltas = timestamps[:, np.newaxis] - edge_times
+
+      edge_deltas_torch = torch.from_numpy(edge_deltas).float().to(self.device)
+
+      neighbors = neighbors.flatten()
+      neighbor_embeddings = self.compute_embedding(memory,
+                                                   neighbors,
+                                                   np.repeat(timestamps, n_neighbors),
+                                                   n_layers=n_layers - 1,
+                                                   n_neighbors=n_neighbors)
+
+      effective_n_neighbors = n_neighbors if n_neighbors > 0 else 1
+      neighbor_embeddings = neighbor_embeddings.view(len(source_nodes), effective_n_neighbors, -1)
+      edge_time_embeddings = self.time_encoder(edge_deltas_torch)
+
+      edge_features = self.edge_features[edge_idxs, :]
+
+      mask = neighbors_torch == 0
+
+      source_embedding,C_source_h,C_source_time,C_neighbor_embeddings,\
+           C_edge_time_embeddings,C_edge_features = self.aggregate(n_layers, source_node_conv_embeddings,
+                                        source_nodes_time_embedding,
+                                        neighbor_embeddings,
+                                        edge_time_embeddings,
+                                        edge_features,
+                                        mask)
+
+      return source_embedding
+
+
+
 
   def aggregate(self, n_layers, source_node_features, source_nodes_time_embedding,
                 neighbor_embeddings,
@@ -1201,304 +1185,333 @@ class GraphEmbedding(EmbeddingModule):
     return NotImplemented
 
 
+
   def compute_embedding_iterative(self, memory, source_nodes, timestamps, n_layers, n_neighbors=20):
-      B = len(source_nodes)
-      #print('source nodes',source_nodes)
-      source_nodes_torch = torch.from_numpy(source_nodes).long().to(self.device)
-      timestamps_torch = torch.unsqueeze(torch.from_numpy(timestamps).float().to(self.device), dim=1)
+      assert n_layers >= 0
 
-      raw_source_node_features = self.node_features[source_nodes_torch, :]  # [B, D_node]
+      effective_n_neighbors = n_neighbors if n_neighbors > 0 else 1
+      root_batch_size = len(source_nodes)
 
-      # print('raw_source_node_features',raw_source_node_features.shape)
+      nodes_per_depth = [np.asarray(source_nodes)]
+      timestamps_per_depth = [np.asarray(timestamps)]
+      neighbors_per_depth = []
+      edge_idxs_per_depth = []
+      masks_per_depth = []
+      edge_deltas_per_depth = []
+      root_batch_indices_per_depth = [np.arange(root_batch_size)]
+      top_neighbor_slots_per_depth = [np.full(root_batch_size, -1, dtype=np.int64)]
 
-      # 最底层：静态特征 + memory（可选）
-      h = raw_source_node_features.clone()
-      if self.use_memory:
-          h = h + memory[source_nodes, :]
+      current_nodes = np.asarray(source_nodes)
+      current_timestamps = np.asarray(timestamps)
+      current_root_batch_indices = np.arange(root_batch_size)
+      current_top_neighbor_slots = np.full(root_batch_size, -1, dtype=np.int64)
 
-      # 初始时间编码（始终为0，因为是 query 节点当前时间）
-      source_nodes_time_embedding = self.time_encoder(torch.zeros_like(timestamps_torch))  # [B, Dₜ]
-
-      #print('source_nodes_time_embedding',source_nodes_time_embedding)
-
-
-
-
-      for layer in range(n_layers):
-          # 采样邻居（每一层用当前 query 时间采样）
+      for layer_idx in range(n_layers):
           neighbors, edge_idxs, edge_times = self.neighbor_finder.get_temporal_neighbor(
-              source_nodes, timestamps, n_neighbors=n_neighbors
+              current_nodes,
+              current_timestamps,
+              n_neighbors=n_neighbors,
           )
+          neighbors_per_depth.append(neighbors)
+          edge_idxs_per_depth.append(edge_idxs)
+          masks_per_depth.append(neighbors == 0)
+          edge_deltas_per_depth.append(current_timestamps[:, np.newaxis] - edge_times)
 
-          # print('neighbors',neighbors,neighbors.shape)
-          # print('edge_idxs',edge_idxs,edge_idxs.shape)
-          # print('edge_times',edge_times)
+          current_nodes = neighbors.flatten()
+          current_timestamps = np.repeat(current_timestamps, effective_n_neighbors)
+          current_root_batch_indices = np.repeat(current_root_batch_indices, effective_n_neighbors)
+          if layer_idx == 0:
+              current_top_neighbor_slots = np.tile(
+                  np.arange(effective_n_neighbors, dtype=np.int64),
+                  len(neighbors),
+              )
+          else:
+              current_top_neighbor_slots = np.repeat(current_top_neighbor_slots, effective_n_neighbors)
+          nodes_per_depth.append(current_nodes)
+          timestamps_per_depth.append(current_timestamps)
+          root_batch_indices_per_depth.append(current_root_batch_indices)
+          top_neighbor_slots_per_depth.append(current_top_neighbor_slots)
 
-          neighbors_torch = torch.from_numpy(neighbors).long().to(self.device)
-          #print('neighbors_torch',neighbors_torch)
-          edge_idxs_torch = torch.from_numpy(edge_idxs).long().to(self.device)
-          edge_deltas = timestamps[:, np.newaxis] - edge_times
-
-          # print('timestamps',timestamps)
-
-          # print('edge_deltas',edge_deltas,edge_deltas.shape)
-
-          edge_deltas_torch = torch.from_numpy(edge_deltas).float().to(self.device)
-
-          # 获取邻居嵌入（从上一层）
-          flat_neighbors = neighbors.flatten()
-          # print('flat_neighbors ',len(flat_neighbors) )
-          h_neighbors = self.node_features[flat_neighbors, :]
+      embeddings = []
+      source_time_embeddings = []
+      raw_node_features = []
+      for depth_nodes, depth_timestamps in zip(nodes_per_depth, timestamps_per_depth):
+          depth_nodes_torch = torch.from_numpy(depth_nodes).long().to(self.device)
+          depth_timestamps_torch = torch.unsqueeze(
+              torch.from_numpy(depth_timestamps).float().to(self.device),
+              dim=1,
+          )
+          raw_features = self.node_features[depth_nodes_torch, :]
+          base_embedding = raw_features.clone()
           if self.use_memory:
-              h_neighbors = h_neighbors + memory[flat_neighbors, :]
-          # print('h_neighbors ', h_neighbors.shape)
+              base_embedding = base_embedding + memory[depth_nodes, :]
+          embeddings.append(base_embedding)
+          raw_node_features.append(raw_features)
+          source_time_embeddings.append(self.time_encoder(torch.zeros_like(depth_timestamps_torch)))
 
-          h_neighbors = h_neighbors.view(B, n_neighbors, -1)
+      layer_caches = [[None for _ in range(n_layers + 1)] for _ in range(n_layers)]
+      final_embedding = embeddings[0]
+      top_neighbors = np.zeros((root_batch_size, effective_n_neighbors), dtype=np.int64)
+      top_edge_idxs = np.zeros((root_batch_size, effective_n_neighbors), dtype=np.int64)
 
-          # print('h_neighbors',h_neighbors.shape)
+      for remaining_layers in range(1, n_layers + 1):
+          for depth in range(0, n_layers - remaining_layers + 1):
+              batch_size = len(nodes_per_depth[depth])
+              neighbors = neighbors_per_depth[depth]
+              edge_idxs = edge_idxs_per_depth[depth]
+              mask = torch.from_numpy(masks_per_depth[depth]).to(self.device)
+              edge_idxs_torch = torch.from_numpy(edge_idxs).long().to(self.device)
+              edge_deltas_torch = torch.from_numpy(edge_deltas_per_depth[depth]).float().to(self.device)
 
-          # 时间编码与边特征
-          edge_time_embeddings = self.time_encoder(edge_deltas_torch)  # [B, N, Dₜ]
-          # print('edge_time_embeddings',edge_time_embeddings.shape)
-          edge_features = self.edge_features[edge_idxs_torch, :]  # [B, N, Dₑ]
-          # print('edge_features',edge_features.shape)
-          mask = neighbors_torch == 0  # [B, N]
+              aggregated = self.aggregate(
+                  remaining_layers,
+                  embeddings[depth],
+                  source_time_embeddings[depth],
+                  embeddings[depth + 1].view(batch_size, effective_n_neighbors, -1),
+                  self.time_encoder(edge_deltas_torch),
+                  self.edge_features[edge_idxs_torch, :],
+                  mask,
+              )
+              embeddings[depth] = aggregated[0]
+              layer_caches[depth][remaining_layers] = {
+                  'output_embedding': aggregated[0],
+                  'source_contrib': aggregated[1],
+                  'source_time_contrib': aggregated[2],
+                  'neighbor_contrib': aggregated[3],
+                  'edge_time_contrib': aggregated[4],
+                  'edge_feature_contrib': aggregated[5],
+                  'neighbors': neighbors,
+                  'edge_idxs': edge_idxs,
+                  'timestamps': timestamps_per_depth[depth],
+              }
 
+              if depth == 0 and remaining_layers == n_layers:
+                  final_embedding = aggregated[0]
+                  top_neighbors = neighbors
+                  top_edge_idxs = edge_idxs
 
-          # 聚合：本层嵌入 = f(hᶫ⁻¹, neighbors)
-          h ,C_source_h,C_source_time,C_neighbor_embeddings,\
-           C_edge_time_embeddings,C_edge_features= self.aggregate(layer + 1, h,
-                             source_nodes_time_embedding,
-                             h_neighbors,
-                             edge_time_embeddings,
-                             edge_features,
-                             mask)
-
-          # print('layer+1',layer+1)
-      if self.use_memory:
-          C_raw_features, C_memory_features = self.allocate_source_contributions(
-              C_source_h, raw_source_node_features, memory, source_nodes
-          )
-          # print(C_raw_features.shape)
-          # print(C_memory_features.shape)
-          #
-          # print(C_source_h.shape)
-
-          total_source_contrib = C_raw_features.sum(dim=1) + C_memory_features.sum(dim=1)
-          expected_total = C_source_h.sum(dim=1)
-          check = torch.allclose(total_source_contrib, expected_total, atol=1e-8, rtol=1e-8)
-          print(f"  分配验证: {'通过' if check else '失败'}")
-
-          C_neighbor_raw_features, C_neighbor_memory_features = self.allocate_neighbor_contributions(
-              C_neighbor_embeddings, flat_neighbors, memory
-          )
-
-          print('C_neighbor_memory_features',C_neighbor_memory_features.shape)
-
-          total_neighbor_contrib = C_neighbor_raw_features.sum(dim=(1, 2)) + C_neighbor_memory_features.sum(dim=(1, 2))
-          expected_neighbor_total = C_neighbor_embeddings.sum(dim=(1, 2))
-          neighbor_check = torch.allclose(total_neighbor_contrib, expected_neighbor_total, atol=1e-8, rtol=1e-8)
-          print(f"  邻居贡献值分配验证: {'通过' if neighbor_check else '失败'}")
-
-      temporal_edge_contributions= self.map_contributions_to_temporal_edges(C_raw_features,C_source_time,
-          C_neighbor_raw_features, C_edge_time_embeddings, C_edge_features,
-          source_nodes, neighbors, edge_idxs, timestamps
+      output_dim = final_embedding.shape[1]
+      output_dtype = final_embedding.dtype
+      output_device = final_embedding.device
+      final_source_memory_features = torch.zeros(
+          root_batch_size,
+          raw_node_features[0].shape[1],
+          output_dim,
+          dtype=output_dtype,
+          device=output_device,
       )
+      top_neighbor_memory_features = torch.zeros(
+          root_batch_size,
+          effective_n_neighbors,
+          raw_node_features[0].shape[1],
+          output_dim,
+          dtype=output_dtype,
+          device=output_device,
+      )
+      downstream = [[None for _ in range(n_layers + 1)] for _ in range(n_layers + 1)]
+      downstream[0][n_layers] = torch.diag_embed(final_embedding).to(dtype=output_dtype, device=output_device)
 
-      # C_neighbor_memory_dict=dict()
+      temporal_edge_contributions = {}
 
-      #print('temporal_edge_contributions',temporal_edge_contributions)
-      # print('edge_info_list',edge_info_list)
+      for remaining_layers in range(n_layers, 0, -1):
+          for depth in range(0, n_layers - remaining_layers + 1):
+              downstream_current = downstream[depth][remaining_layers]
+              if downstream_current is None:
+                  continue
 
-      # 处理邻居贡献值（新增部分）
-      C_neighbor_message_to_memory_features = dict()
-      C_neighbor_old_memory_to_memory_features = dict()
-      neighbor_memory_verify = True
-      
-      # if C_message is not None and C_memory is not None and self.use_memory:
-      #     C_neighbor_memory_features = C_neighbor_memory_features.to(torch.float64)
-      #
-      #     # 使用最后一层的neighbors信息（已经在循环中获取）
-      #     # neighbors: [B, K], edge_idxs: [B, K]
-      #
-      #     # 遍历每个源节点和其邻居
-      #     for b in range(len(source_nodes)):
-      #         node_neighbors = neighbors[b]  # 直接使用已有的neighbors
-      #         for k, neighbor_node in enumerate(node_neighbors):
-      #             edge_idx = edge_idxs[b, k]
-      #
-      #             C_neighbor_memory_dict[str(source_nodes[b].item())+','+str(neighbor_node.item())+','+str(edge_idx.item())]=C_neighbor_memory_features[b, k]
-      #
-      #
-      #             if neighbor_node in C_message:
-      #                 v = C_message[neighbor_node].to(
-      #                     dtype=C_neighbor_memory_features.dtype,
-      #                     device=C_neighbor_memory_features.device
-      #                 )
-      #
-      #                 u = C_memory[neighbor_node].to(
-      #                     dtype=C_neighbor_memory_features.dtype,
-      #                     device=C_neighbor_memory_features.device
-      #                 )
-      #                 # 获取对应的neighbor memory features
-      #                 neighbor_memory_feature = C_neighbor_memory_features[b, k]  # [D_n, D_out]
-      #
-      #                 # print('neighbor_memory_feature',neighbor_memory_feature.shape)
-      #                 # print('v.shape',v.shape)
-      #                 # print('u.shape', u.shape)
-      #
-      #                 C_neighbor_message_to_memory_features[edge_idx] = v @ neighbor_memory_feature
-      #
-      #                 C_neighbor_old_memory_to_memory_features[edge_idx] = u @ neighbor_memory_feature
-      #
-      #                 # test1=(v @ neighbor_memory_feature).sum(dim=0) + (u @ neighbor_memory_feature).sum(dim=0)
-      #                 # test2=neighbor_memory_feature.sum(dim=0)
-      #                 #
-      #                 # print('test1',test1)
-      #                 # print('test2',test2)
-      #             else:
-      #                 #print('not node',C_neighbor_memory_features[b, k])
-      #                 sub = C_neighbor_memory_features[b, k]
-      #
-      #                 if torch.all(sub == 0):
-      #                     pass
-      #                 else:
-      #                     print("非零元素:", sub[sub != 0])
-      #
-      #
-      #     # for b in range(len(source_nodes)):
-      #     #     source_node = source_nodes[b]
-      #     #     node_neighbors = neighbors[b]
-      #     #
-      #     #     for k, neighbor_node in enumerate(node_neighbors):
-      #     #             if neighbor_node in C_neighbor_message_to_memory_features:
-      #     #                 # 计算test1: message贡献 + old memory贡献
-      #     #                 message_contrib = C_neighbor_message_to_memory_features[neighbor_node].sum(dim=0)
-      #     #                 old_memory_contrib = C_neighbor_old_memory_to_memory_features[neighbor_node].sum(dim=0)
-      #     #                 test1 = message_contrib + old_memory_contrib
-      #     #                 # 计算test2: neighbor memory features的总和
-      #     #                 test2 = C_neighbor_memory_features[b, k].sum(dim=0)
-      #     #
-      #     #                 print('test1',test1)
-      #     #                 print('test2', test2)
-      #     #
-      #     #                 # 验证是否守恒
-      #     #                 if not torch.allclose(test1, test2, atol=1e-4):
-      #     #                     neighbor_memory_verify = False
-      #     #                     diff = torch.abs(test1 - test2).max().item()
-      #     #
-      #     #
-      #     # # 打印验证结果
-      #     # if neighbor_memory_verify:
-      #     #     print(f'邻居守恒验证结果: 通过 ✅')
-      #     # else:
-      #     #     print(f'邻居守恒验证结果: 失败 ❌')
+              cache = layer_caches[depth][remaining_layers]
+              if cache is None:
+                  continue
 
-      total = None
-      for idx, mat in temporal_edge_contributions.items():
-          for _,second_mat in mat.items():
-              if total is None:
-                  total = second_mat.clone()
+              output_embedding = cache['output_embedding']
+              output_den_source = output_embedding.unsqueeze(1)
+              output_den_neighbor = output_embedding.unsqueeze(1).unsqueeze(1)
+
+              source_share = torch.where(
+                  output_den_source != 0,
+                  cache['source_contrib'] / output_den_source,
+                  torch.zeros_like(cache['source_contrib']),
+              )
+              source_time_share = torch.where(
+                  output_den_source != 0,
+                  cache['source_time_contrib'] / output_den_source,
+                  torch.zeros_like(cache['source_time_contrib']),
+              )
+              neighbor_share = torch.where(
+                  output_den_neighbor != 0,
+                  cache['neighbor_contrib'] / output_den_neighbor,
+                  torch.zeros_like(cache['neighbor_contrib']),
+              )
+              edge_time_share = torch.where(
+                  output_den_neighbor != 0,
+                  cache['edge_time_contrib'] / output_den_neighbor,
+                  torch.zeros_like(cache['edge_time_contrib']),
+              )
+              edge_feat_share = torch.where(
+                  output_den_neighbor != 0,
+                  cache['edge_feature_contrib'] / output_den_neighbor,
+                  torch.zeros_like(cache['edge_feature_contrib']),
+              )
+
+              source_to_top = torch.einsum('bid,bdo->bio', source_share, downstream_current)
+              source_time_to_top = torch.einsum('bid,bdo->bio', source_time_share, downstream_current)
+              neighbor_to_top = torch.einsum('bkid,bdo->bkio', neighbor_share, downstream_current)
+              edge_time_to_top = torch.einsum('bkid,bdo->bkio', edge_time_share, downstream_current)
+              edge_feat_to_top = torch.einsum('bkid,bdo->bkio', edge_feat_share, downstream_current)
+              root_batch_indices = root_batch_indices_per_depth[depth]
+
+              if remaining_layers > 1:
+                  layer_temporal = self.map_leaf_contributions_to_temporal_edges(
+                      source_time_to_top,
+                      edge_time_to_top,
+                      edge_feat_to_top,
+                      nodes_per_depth[depth],
+                      cache['neighbors'],
+                      cache['edge_idxs'],
+                      cache['timestamps'],
+                  )
+                  self._accumulate_temporal_edge_contributions(
+                      temporal_edge_contributions,
+                      layer_temporal,
+                      root_batch_indices,
+                  )
+
+              if remaining_layers == 1:
+                  source_raw_features, source_memory_features = self.allocate_source_contributions(
+                      source_to_top,
+                      raw_node_features[depth],
+                      memory,
+                      nodes_per_depth[depth],
+                  )
+
+                  neighbor_raw_features, neighbor_memory_features = self.allocate_neighbor_contributions(
+                      neighbor_to_top,
+                      cache['neighbors'].flatten(),
+                      memory,
+                  )
+
+                  source_memory_features = source_memory_features.to(dtype=output_dtype, device=output_device)
+                  neighbor_memory_features = neighbor_memory_features.to(dtype=output_dtype, device=output_device)
+
+                  top_neighbor_slots = top_neighbor_slots_per_depth[depth]
+                  for batch_idx, root_batch_idx in enumerate(root_batch_indices):
+                      root_batch_idx = int(root_batch_idx)
+                      if depth == 0:
+                          final_source_memory_features[root_batch_idx] += source_memory_features[batch_idx]
+                          for neighbor_idx in range(effective_n_neighbors):
+                              top_neighbor_memory_features[root_batch_idx, neighbor_idx] += (
+                                  neighbor_memory_features[batch_idx, neighbor_idx]
+                              )
+                      else:
+                          top_slot = int(top_neighbor_slots[batch_idx])
+                          if top_slot >= 0:
+                              top_neighbor_memory_features[root_batch_idx, top_slot] += (
+                                  source_memory_features[batch_idx] +
+                                  neighbor_memory_features[batch_idx].sum(dim=0)
+                              )
+
+                  layer_temporal = self.map_contributions_to_temporal_edges(
+                      source_raw_features,
+                      source_time_to_top,
+                      neighbor_raw_features,
+                      edge_time_to_top,
+                      edge_feat_to_top,
+                      nodes_per_depth[depth],
+                      cache['neighbors'],
+                      cache['edge_idxs'],
+                      cache['timestamps'],
+                  )
+                  self._accumulate_temporal_edge_contributions(
+                      temporal_edge_contributions,
+                      layer_temporal,
+                      root_batch_indices,
+                  )
+                  continue
+
+              prev_source = downstream[depth][remaining_layers - 1]
+              if prev_source is None:
+                  downstream[depth][remaining_layers - 1] = source_to_top.clone()
               else:
-                  total = total + second_mat
+                  downstream[depth][remaining_layers - 1] = prev_source + source_to_top
 
+              flat_neighbor_to_top = neighbor_to_top.reshape(-1, neighbor_to_top.shape[2], neighbor_to_top.shape[3])
+              prev_neighbor = downstream[depth + 1][remaining_layers - 1]
+              if prev_neighbor is None:
+                  downstream[depth + 1][remaining_layers - 1] = flat_neighbor_to_top.clone()
+              else:
+                  downstream[depth + 1][remaining_layers - 1] = prev_neighbor + flat_neighbor_to_top
 
-
-      # sum_dict = torch.stack(list(temporal_edge_contributions.values()), dim=0).sum(dim=0)  # [D_out]
-
-      print('sum_dict',total.shape)
-
-      # 2) 原始三部分贡献矩阵分别对所有轴求和，再相加
-      sum_raw = C_neighbor_raw_features.sum(dim=(0, 1, 2))  # [D_out]
-      sum_time = C_edge_time_embeddings.sum(dim=(0, 1, 2))  # [D_out]
-      sum_feat = C_edge_features.sum(dim=(0, 1, 2))  # [D_out]
-      sum_raw_2=C_raw_features.sum(dim=(0, 1))
-      sum_source=C_source_time.sum(dim=(0, 1))
-
-      sum_original = sum_raw + sum_time + sum_feat+sum_raw_2 +sum_source # [D_out]
-
-      print('sum_original',sum_original.shape)
-
-      print('sum_original',sum_original)
-      print('sum_dict',total)
-
-      # 3) 守恒检查
-      check = torch.allclose(total, sum_original, atol=1e-4)
-      print("守恒验证:", "通过 ✅" if check else "失败 ❌")
-
-      return (h,  C_memory_features,
-               C_neighbor_memory_features,
-              temporal_edge_contributions,neighbors,edge_idxs)
-
+      return (
+          final_embedding,
+          final_source_memory_features,
+          top_neighbor_memory_features,
+          temporal_edge_contributions,
+          top_neighbors,
+          top_edge_idxs,
+      )
 
 
   def compute_embedding_iterative_without_contribution(self, memory, source_nodes, timestamps, n_layers, n_neighbors=20):
-      B = len(source_nodes)
-      # print('source nodes',source_nodes)
-      # print('memory.shape',memory.shape)
-      source_nodes_torch = torch.from_numpy(source_nodes).long().to(self.device)
-      timestamps_torch = torch.unsqueeze(torch.from_numpy(timestamps).float().to(self.device), dim=1)
+      assert n_layers >= 0
 
-      raw_source_node_features = self.node_features[source_nodes_torch, :]  # [B, D_node]
+      effective_n_neighbors = n_neighbors if n_neighbors > 0 else 1
+      nodes_per_depth = [np.asarray(source_nodes)]
+      timestamps_per_depth = [np.asarray(timestamps)]
+      neighbors_per_depth = []
+      edge_idxs_per_depth = []
+      masks_per_depth = []
+      edge_deltas_per_depth = []
 
-      # 最底层：静态特征 + memory（可选）
-      h = raw_source_node_features.clone()
-      if self.use_memory:
-          h = h + memory[source_nodes, :]
-
-      # 初始时间编码（始终为0，因为是 query 节点当前时间）
-      source_nodes_time_embedding = self.time_encoder(torch.zeros_like(timestamps_torch))  # [B, Dₜ]
-
-
-      for layer in range(n_layers):
-          # 采样邻居（每一层用当前 query 时间采样）
+      current_nodes = np.asarray(source_nodes)
+      current_timestamps = np.asarray(timestamps)
+      for _ in range(n_layers):
           neighbors, edge_idxs, edge_times = self.neighbor_finder.get_temporal_neighbor(
-              source_nodes, timestamps, n_neighbors=n_neighbors
+              current_nodes,
+              current_timestamps,
+              n_neighbors=n_neighbors,
           )
+          neighbors_per_depth.append(neighbors)
+          edge_idxs_per_depth.append(edge_idxs)
+          masks_per_depth.append(neighbors == 0)
+          edge_deltas_per_depth.append(current_timestamps[:, np.newaxis] - edge_times)
 
+          current_nodes = neighbors.flatten()
+          current_timestamps = np.repeat(current_timestamps, effective_n_neighbors)
+          nodes_per_depth.append(current_nodes)
+          timestamps_per_depth.append(current_timestamps)
 
-
-          neighbors_torch = torch.from_numpy(neighbors).long().to(self.device)
-          # print('neighbors_torch',neighbors_torch)
-          edge_idxs_torch = torch.from_numpy(edge_idxs).long().to(self.device)
-          edge_deltas = timestamps[:, np.newaxis] - edge_times
-
-          # print('timestamps',timestamps)
-
-          # print('edge_deltas',edge_deltas,edge_deltas.shape)
-
-          edge_deltas_torch = torch.from_numpy(edge_deltas).float().to(self.device)
-
-          # 获取邻居嵌入（从上一层）
-          flat_neighbors = neighbors.flatten()
-
-          h_neighbors = self.node_features[flat_neighbors, :]
+      embeddings = []
+      source_time_embeddings = []
+      for depth_nodes, depth_timestamps in zip(nodes_per_depth, timestamps_per_depth):
+          depth_nodes_torch = torch.from_numpy(depth_nodes).long().to(self.device)
+          depth_timestamps_torch = torch.unsqueeze(
+              torch.from_numpy(depth_timestamps).float().to(self.device),
+              dim=1,
+          )
+          base_embedding = self.node_features[depth_nodes_torch, :].clone()
           if self.use_memory:
-              h_neighbors = h_neighbors + memory[flat_neighbors, :]
+              base_embedding = base_embedding + memory[depth_nodes, :]
+          embeddings.append(base_embedding)
+          source_time_embeddings.append(self.time_encoder(torch.zeros_like(depth_timestamps_torch)))
 
+      for remaining_layers in range(1, n_layers + 1):
+          for depth in range(0, n_layers - remaining_layers + 1):
+              batch_size = len(nodes_per_depth[depth])
+              edge_idxs_torch = torch.from_numpy(edge_idxs_per_depth[depth]).long().to(self.device)
+              edge_deltas_torch = torch.from_numpy(edge_deltas_per_depth[depth]).float().to(self.device)
+              mask = torch.from_numpy(masks_per_depth[depth]).to(self.device)
 
-          h_neighbors = h_neighbors.view(B, n_neighbors, -1)
+              embeddings[depth] = self.aggregate_without_contribution(
+                  remaining_layers,
+                  embeddings[depth],
+                  source_time_embeddings[depth],
+                  embeddings[depth + 1].view(batch_size, effective_n_neighbors, -1),
+                  self.time_encoder(edge_deltas_torch),
+                  self.edge_features[edge_idxs_torch, :],
+                  mask,
+              )
 
-
-          # 时间编码与边特征
-          edge_time_embeddings = self.time_encoder(edge_deltas_torch)  # [B, N, Dₜ]
-
-
-          edge_features = self.edge_features[edge_idxs_torch, :]  # [B, N, Dₑ]
-
-          mask = neighbors_torch == 0  # [B, N]
-
-          # 聚合：本层嵌入 = f(hᶫ⁻¹, neighbors)
-          h = self.aggregate_without_contribution(layer + 1, h,
-                                                                       source_nodes_time_embedding,
-                                                                       h_neighbors,
-                                                                       edge_time_embeddings,
-                                                                       edge_features,
-                                                                       mask)
-
-
-
-      return h
+      return embeddings[0]
 
   def allocate_source_contributions(self, C_source_h, raw_source_node_features, memory, source_nodes):
       C_source_h = C_source_h.double()
@@ -1652,8 +1665,70 @@ class GraphEmbedding(EmbeddingModule):
 
       return edge_contributions_dict
 
+  def map_leaf_contributions_to_temporal_edges(self, C_source_time, C_edge_time_embeddings,
+                                               C_edge_features, source_nodes, neighbors,
+                                               edge_idxs, timestamps):
+      B, K, _, _ = C_edge_time_embeddings.shape
+      edge_contributions_dict = {}
+
+      for b in range(B):
+          if b not in edge_contributions_dict:
+              edge_contributions_dict[b] = {}
+
+          add_from_source = C_source_time[b].sum(dim=0) / K
+          for k in range(K):
+              edge_idx = edge_idxs[b, k]
+              edge_total_contrib = (
+                  C_edge_time_embeddings[b, k].sum(dim=0) +
+                  C_edge_features[b, k].sum(dim=0) +
+                  add_from_source
+              )
+              if edge_idx in edge_contributions_dict[b]:
+                  edge_contributions_dict[b][edge_idx] += edge_total_contrib
+              else:
+                  edge_contributions_dict[b][edge_idx] = edge_total_contrib
+
+      return edge_contributions_dict
+
+  def _accumulate_temporal_edge_contributions(self, temporal_edge_contributions, layer_temporal,
+                                              root_batch_indices):
+      for batch_idx, contribs in layer_temporal.items():
+          root_batch_idx = int(root_batch_indices[batch_idx])
+          if root_batch_idx not in temporal_edge_contributions:
+              temporal_edge_contributions[root_batch_idx] = {}
+          for edge_idx, contrib in contribs.items():
+              if edge_idx in temporal_edge_contributions[root_batch_idx]:
+                  temporal_edge_contributions[root_batch_idx][edge_idx] += contrib
+              else:
+                  temporal_edge_contributions[root_batch_idx][edge_idx] = contrib.clone()
+
 
 class GraphSumEmbedding(GraphEmbedding):
+  @dataclass
+  class GraphSumForwardCache:
+    source_node_features: torch.Tensor
+    source_nodes_time_embedding: torch.Tensor
+    neighbor_embeddings: torch.Tensor
+    edge_time_embeddings: torch.Tensor
+    edge_features: torch.Tensor
+    neighbors_features: torch.Tensor
+    nb_lin: torch.Tensor
+    nb_sum_pre: torch.Tensor
+    neighbors_sum: torch.Tensor
+    src_time: torch.Tensor
+    source_features: torch.Tensor
+    z: torch.Tensor
+    source_embedding: torch.Tensor
+
+  @dataclass
+  class GraphSumAttributionResult:
+    source_embedding: torch.Tensor
+    source_node_features_to_semb: torch.Tensor
+    source_time_to_semb: torch.Tensor
+    neighbor_embeddings_to_semb: torch.Tensor
+    edge_time_embeddings_to_semb: torch.Tensor
+    edge_features_to_semb: torch.Tensor
+
   def __init__(self, node_features, edge_features, memory, neighbor_finder, time_encoder, n_layers,
                n_node_features, n_edge_features, n_time_features, embedding_dimension, device,
                n_heads=2, dropout=0.1, use_memory=True):
@@ -1676,229 +1751,233 @@ class GraphSumEmbedding(GraphEmbedding):
       [torch.nn.Linear(embedding_dimension + n_node_features + n_time_features,
                        embedding_dimension) for _ in range(n_layers)])
 
-  def linear_contribution(self,weight,input,out):
-      Z = input.unsqueeze(2) * weight.unsqueeze(0)
-      S = Z.sum(dim=1)  # [B, D_out]  分母
 
-      den = S.unsqueeze(1)  # [B, 1, D_out] 便于广播
-      phi = torch.where(den != 0, Z / den, torch.zeros_like(Z))  # 分母为0 → 0
+  def _compute_linear_share(self, weight, input_tensor):
+      Z = input_tensor.unsqueeze(2) * weight.unsqueeze(0)
+      S = Z.sum(dim=1)
+      den = S.unsqueeze(1)
+      return torch.where(den != 0, Z / den, torch.zeros_like(Z))
 
-      C = phi * out.unsqueeze(1)
+  def _attribute_linear_output(self, weight, input_tensor, output_tensor):
+      phi = self._compute_linear_share(weight, input_tensor)
+      return phi * output_tensor.unsqueeze(1)
 
-      ok_mask = torch.isclose(C.sum(dim=1), out, atol=1e-4)
-      print("全部匹配吗:", ok_mask.all().item())
-      if not ok_mask.all():
-          # 获取不匹配的 (batch_idx, out_idx) 坐标
-          mismatch_coords = (~ok_mask).nonzero(as_tuple=False)  # [N_mismatch, 2]
-          print("不匹配坐标:\n", mismatch_coords)
+  def _attribute_relu(self, pre_activation, post_activation, downstream_contribution):
+      relu_alpha = torch.where(
+          pre_activation != 0,
+          post_activation / pre_activation,
+          torch.zeros_like(pre_activation),
+      )
+      return downstream_contribution * relu_alpha.unsqueeze(-1)
 
-          # 还可以查看这些位置的值对比
-          for b_idx, o_idx in mismatch_coords:
-              pred_val = C.sum(dim=1)[b_idx, o_idx].item()
-              true_val = out[b_idx, o_idx].item()
-              diff = pred_val - true_val
-              print(f"[b={b_idx}, o={o_idx}] 预测={pred_val:.6f}, 真值={true_val:.6f}, 差值={diff:.6e}")
+  def _attribute_sum(self, parts, summed, downstream_contribution):
+      den_sum = summed.unsqueeze(1)
+      share_sum = torch.where(
+          den_sum != 0,
+          parts / den_sum,
+          torch.zeros_like(parts),
+      )
+      return share_sum.unsqueeze(-1) * downstream_contribution.unsqueeze(1)
 
-      # print(C.sum(dim=1))
-      #
-      # print(out)
+  def _split_concat_contributions(self, contribution, split_sizes, dim):
+      return torch.split(contribution, split_sizes, dim=dim)
 
-      # print('linear 1',torch.allclose(C.sum(dim=1), out, atol=1e-4))
-      return C
+  def _ensure_graph_sum_dtype(self, n_layer, source_node_features, source_nodes_time_embedding,
+                              neighbor_embeddings, edge_time_embeddings, edge_features):
+      return (
+          source_node_features,
+          source_nodes_time_embedding,
+          neighbor_embeddings,
+          edge_time_embeddings,
+          edge_features,
+      )
+
+  def _graph_sum_forward(self, n_layer, source_node_features, source_nodes_time_embedding,
+                         neighbor_embeddings, edge_time_embeddings, edge_features):
+      (
+          source_node_features,
+          source_nodes_time_embedding,
+          neighbor_embeddings,
+          edge_time_embeddings,
+          edge_features,
+      ) = self._ensure_graph_sum_dtype(
+          n_layer,
+          source_node_features,
+          source_nodes_time_embedding,
+          neighbor_embeddings,
+          edge_time_embeddings,
+          edge_features,
+      )
+
+      neighbors_features = torch.cat(
+          [neighbor_embeddings, edge_time_embeddings, edge_features],
+          dim=2,
+      )
+      nb_lin = self.linear_1[n_layer - 1](neighbors_features)
+      nb_sum_pre = nb_lin.sum(dim=1)
+      neighbors_sum = torch.nn.functional.relu(nb_sum_pre)
+
+      src_time = source_nodes_time_embedding.squeeze()
+      source_features = torch.cat([source_node_features, src_time], dim=1)
+      # print('source_features', source_features.shape)
+
+      z = torch.cat([neighbors_sum, source_features], dim=1)
+      # print('source_embedding', z.shape)
+
+      source_embedding = self.linear_2[n_layer - 1](z)
+      # print('source_embedding', source_embedding.shape)
+
+      return self.GraphSumForwardCache(
+          source_node_features=source_node_features,
+          source_nodes_time_embedding=source_nodes_time_embedding,
+          neighbor_embeddings=neighbor_embeddings,
+          edge_time_embeddings=edge_time_embeddings,
+          edge_features=edge_features,
+          neighbors_features=neighbors_features,
+          nb_lin=nb_lin,
+          nb_sum_pre=nb_sum_pre,
+          neighbors_sum=neighbors_sum,
+          src_time=src_time,
+          source_features=source_features,
+          z=z,
+          source_embedding=source_embedding,
+      )
+
+  def _attribute_graph_sum_inputs(self, n_layer, cache):
+      z64 = cache.z.to(torch.float64)
+      source_embedding64 = cache.source_embedding.to(torch.float64)
+      neighbors_sum64 = cache.neighbors_sum.to(torch.float64)
+      nb_sum_pre64 = cache.nb_sum_pre.to(torch.float64)
+      nb_lin64 = cache.nb_lin.to(torch.float64)
+      neighbors_features64 = cache.neighbors_features.to(torch.float64)
+      source_node_features64 = cache.source_node_features.to(torch.float64)
+      src_time64 = cache.src_time.to(torch.float64)
+      neighbor_embeddings64 = cache.neighbor_embeddings.to(torch.float64)
+      edge_time_embeddings64 = cache.edge_time_embeddings.to(torch.float64)
+      edge_features64 = cache.edge_features.to(torch.float64)
+
+      W2_T = self.linear_2[n_layer - 1].weight.t().to(torch.float64)
+      C_z_to_semb = self._attribute_linear_output(W2_T, z64, source_embedding64)
+      # print(' C_z_to_semb.shape', C_z_to_semb.shape)
+
+      H1 = neighbors_sum64.size(1)
+      B, K, D_nf = neighbors_features64.shape
+
+      C_ns_to_semb = C_z_to_semb[:, :H1, :]
+      R_nb_sum_pre = self._attribute_relu(
+          nb_sum_pre64,
+          neighbors_sum64,
+          C_ns_to_semb,
+      )
+
+      R_nb_lin = self._attribute_sum(nb_lin64, nb_sum_pre64, R_nb_sum_pre)
+
+      # print('linear 2', torch.allclose(R_nb_lin.sum(dim=1), R_nb_sum_pre, atol=1e-4))
+      # print('linear 3', torch.allclose(C_ns_to_semb, R_nb_sum_pre, atol=1e-4))
+
+      X_nf = neighbors_features64.reshape(B * K, D_nf)
+      W1_T = self.linear_1[n_layer - 1].weight.t().to(torch.float64)
+      R_nf_to_nb = self._compute_linear_share(W1_T, X_nf).reshape(B, K, D_nf, H1)
+      # print('R_nf_to_nb.shape', R_nf_to_nb.shape)
+
+      C_nf_to_semb = torch.einsum('bkfh,bkho->bkfo', R_nf_to_nb, R_nb_lin)
+      lhs = C_nf_to_semb.sum(dim=2)
+      rhs = R_nb_lin.sum(dim=2)
+      # print('linear 4', torch.allclose(lhs, rhs, atol=1e-4))
+
+      D_n = neighbor_embeddings64.size(2)
+      D_te = edge_time_embeddings64.size(2)
+      D_ef = edge_features64.size(2)
+      (
+          C_neighbor_embeddings_to_semb,
+          C_edge_time_embeddings_to_semb,
+          C_edge_features_to_semb,
+      ) = self._split_concat_contributions(C_nf_to_semb, [D_n, D_te, D_ef], dim=2)
+
+      D_sf = source_node_features64.size(1)
+      D_st = src_time64.size(1)
+      C_srcfeat_to_semb = C_z_to_semb[:, H1:, :]
+      (
+          C_source_node_features_to_semb,
+          C_source_time_to_semb,
+      ) = self._split_concat_contributions(C_srcfeat_to_semb, [D_sf, D_st], dim=1)
+
+      nb_sum = (
+              C_neighbor_embeddings_to_semb.sum(dim=(1, 2)) +
+              C_edge_time_embeddings_to_semb.sum(dim=(1, 2)) +
+              C_edge_features_to_semb.sum(dim=(1, 2))
+      )
+      src_sum = (
+              C_source_node_features_to_semb.sum(dim=1) +
+              C_source_time_to_semb.sum(dim=1)
+      )
+      total_contrib = nb_sum + src_sum
+      final_ok = torch.allclose(total_contrib, source_embedding64, atol=1e-4)
+      if not final_ok:
+          abs_err = torch.abs(total_contrib - source_embedding64)
+          max_abs_err = abs_err.max().item()
+          mean_abs_err = abs_err.mean().item()
+          zero_linear_den = (z64.unsqueeze(2) * W2_T.unsqueeze(0)).sum(dim=1) == 0
+          zero_neighbor_sum_den = nb_sum_pre64 == 0
+          if DEBUG_VERBOSE:
+              print(
+                  'final flag debug',
+                  {
+                      'n_layer': int(n_layer),
+                      'batch_size': int(cache.source_embedding.shape[0]),
+                      'embedding_dim': int(cache.source_embedding.shape[1]),
+                      'max_abs_err': max_abs_err,
+                      'mean_abs_err': mean_abs_err,
+                      'zero_linear_den_count': int(zero_linear_den.sum().item()),
+                      'zero_linear_den_total': int(zero_linear_den.numel()),
+                      'zero_neighbor_sum_den_count': int(zero_neighbor_sum_den.sum().item()),
+                      'zero_neighbor_sum_den_total': int(zero_neighbor_sum_den.numel()),
+                  },
+              )
+
+      return self.GraphSumAttributionResult(
+          source_embedding=cache.source_embedding,
+          source_node_features_to_semb=C_source_node_features_to_semb.to(cache.source_embedding.dtype),
+          source_time_to_semb=C_source_time_to_semb.to(cache.source_embedding.dtype),
+          neighbor_embeddings_to_semb=C_neighbor_embeddings_to_semb.to(cache.source_embedding.dtype),
+          edge_time_embeddings_to_semb=C_edge_time_embeddings_to_semb.to(cache.source_embedding.dtype),
+          edge_features_to_semb=C_edge_features_to_semb.to(cache.source_embedding.dtype),
+      )
+
 
 
   def aggregate(self, n_layer, source_node_features, source_nodes_time_embedding,
                 neighbor_embeddings,
                 edge_time_embeddings, edge_features, mask):
-    source_node_features = source_node_features.double()
-    source_nodes_time_embedding = source_nodes_time_embedding.double()
-    neighbor_embeddings = neighbor_embeddings.double()
-    edge_time_embeddings = edge_time_embeddings.double()
-    edge_features = edge_features.double()
-    self.linear_1[n_layer - 1] = self.linear_1[n_layer - 1].double()
-    self.linear_2[n_layer - 1] = self.linear_2[n_layer - 1].double()
-
-    neighbors_features = torch.cat([neighbor_embeddings, edge_time_embeddings, edge_features],
-                                   dim=2)
-    # print('neighbors_features',neighbors_features.shape)
-    nb_lin = self.linear_1[n_layer - 1](neighbors_features)
-    # print('neighbor_embeddings',nb_lin.shape)
-
-    nb_sum_pre = nb_lin.sum(dim=1)  # [B, H1]
-    neighbors_sum = torch.nn.functional.relu(nb_sum_pre)  # [B, H1]
-    # print('neighbors_sum', neighbors_sum.shape)
-
-    src_time = source_nodes_time_embedding.squeeze()  # [B, D_st]
-    source_features = torch.cat([source_node_features, src_time], dim=1)  # [B, D_sf+D_st]
-    print('source_features', source_features.shape)
-
-
-    # source_features = torch.cat([source_node_features,
-    #                              source_nodes_time_embedding.squeeze()], dim=1)
-    # print('source_features', source_features.shape)
-
-    z = torch.cat([neighbors_sum, source_features], dim=1)
-
-    print('source_embedding', z.shape)
-
-    source_embedding = self.linear_2[n_layer - 1](z)
-
-    print('source_embedding', source_embedding.shape)
-    ##############
-
-    W2_T = self.linear_2[n_layer - 1].weight.t()  # [D_z, D_out]
-    C_z_to_semb = self.linear_contribution(W2_T, z, source_embedding)  # [B, D_z, D_out]
-
-    print(' C_z_to_semb.shape', C_z_to_semb.shape)
-
-    H1 = neighbors_sum.size(1)
-    B, K, D_nf = neighbors_features.shape
-    D_out = source_embedding.size(1)
-
-    C_ns_to_semb = C_z_to_semb[:, :H1, :]
-
-    # print('C_ns_to_semb.shape',C_ns_to_semb.shape)
-
-    relu_alpha=torch.where(nb_sum_pre!=0,neighbors_sum/nb_sum_pre,torch.zeros_like(nb_sum_pre))
-    # print('relu_alpha.shape',relu_alpha.shape)
-
-    R_nb_sum_pre = C_ns_to_semb * relu_alpha.unsqueeze(-1)  #
-
-    # print('R_nb_sum_pre',R_nb_sum_pre.shape)
-
-    den_sum = nb_sum_pre.unsqueeze(1)  # [B, 1, H1]
-    share_sum = torch.where(den_sum != 0,
-                            nb_lin / den_sum,  # y/x，其中 y=nb_lin, x=nb_sum_pre
-                            torch.zeros_like(nb_lin))
-
-    R_nb_lin = share_sum.unsqueeze(-1) * R_nb_sum_pre.unsqueeze(1)
-
-    # print('R_nb_lin.shape',R_nb_lin.shape)
-
-    # print('R_nb_lin',R_nb_lin.sum(dim=1))
-    #
-    # print('R_nb_sum_pre',R_nb_sum_pre)
-
-    print('linear 2',torch.allclose(R_nb_lin.sum(dim=1), R_nb_sum_pre, atol=1e-4))
-
-    print('linear 3', torch.allclose(C_ns_to_semb, R_nb_sum_pre, atol=1e-4))
-
-    # print(neighbors_features.shape)
-
-    X_nf = neighbors_features.reshape(B * K, D_nf)
-
-    W1_T = self.linear_1[n_layer - 1].weight.t()
-
-    Z1 = X_nf.unsqueeze(2) * W1_T.unsqueeze(0)  # [BK, D_nf, H1]
-    S1 = Z1.sum(dim=1)  # [BK, H1]
-    den1 = S1.unsqueeze(1)  # [BK, 1, H1]
-    R_nf_to_nb = torch.where(den1 != 0, Z1 / den1, torch.zeros_like(Z1))  # [BK, D_nf, H1]
-
-    R_nf_to_nb = R_nf_to_nb.reshape(B, K, D_nf, H1)
-
-
-    print('R_nf_to_nb.shape',R_nf_to_nb.shape)
-
-    # R1 = R_nb_lin.reshape(B * K, H1, D_out)
-    # print('R1.shape',R1.shape)
-
-    # print(torch.allclose(R1.sum(dim=1), R_nf_to_nb.sum(dim=1), atol=1e-4))
-
-    C_nf_to_semb = torch.einsum('bkfh,bkho->bkfo', R_nf_to_nb, R_nb_lin)
-
-    # print(C_nf_to_semb.shape)
-
-    lhs = C_nf_to_semb.sum(dim=2)  # sum over D_nf → [B,K,D_out]
-    rhs = R_nb_lin.sum(dim=2)  # sum over H → [B,K,D_out]
-    print('linear 4',torch.allclose(lhs, rhs, atol=1e-4))
-
-    D_n = neighbor_embeddings.size(2)  # 邻居自身特征维
-    D_te = edge_time_embeddings.size(2)  # 时间边特征维
-    D_ef = edge_features.size(2)  # 其他边特征维
-
-    C_neighbor_embeddings_to_semb = C_nf_to_semb[:, :, :D_n, :]  # [B,K,D_n ,D_out]
-    C_edge_time_embeddings_to_semb = C_nf_to_semb[:, :, D_n:D_n + D_te, :]  # [B,K,D_te,D_out]
-    C_edge_features_to_semb = C_nf_to_semb[:, :, D_n + D_te:, :]  # [B,K,D_ef,D_out]
-
-    # print('C_neighbor_embeddings_to_semb', C_neighbor_embeddings_to_semb.shape)
-    # print('C_edge_time_embeddings_to_semb', C_edge_time_embeddings_to_semb.shape)
-    # print('C_edge_features_to_semb', C_edge_features_to_semb.shape)
-
-    D_sf = source_node_features.size(1)
-    D_st = src_time.size(1)  # = source_nodes_time_embedding.squeeze().size(1)
-
-    C_srcfeat_to_semb = C_z_to_semb[:, H1:, :]  # [B, D_sf + D_st, D_out]
-    C_source_node_features_to_semb = C_srcfeat_to_semb[:, :D_sf, :]  # [B, D_sf, D_out]
-    C_source_time_to_semb = C_srcfeat_to_semb[:, D_sf:, :]  # [B, D_st, D_out]
-
-    # print('C_source_node_features_to_semb', C_source_node_features_to_semb.shape)
-    # print('C_source_time_to_semb', C_source_time_to_semb.shape)
-
-    nb_sum = (
-            C_neighbor_embeddings_to_semb.sum(dim=(1, 2)) +
-            C_edge_time_embeddings_to_semb.sum(dim=(1, 2)) +
-            C_edge_features_to_semb.sum(dim=(1, 2))
-    )  # [B, D_out]
-
-    # 源节点侧聚合
-    src_sum = (
-            C_source_node_features_to_semb.sum(dim=1) +
-            C_source_time_to_semb.sum(dim=1)
-    )  # [B, D_out]
-
-    total_contrib = nb_sum + src_sum  # [B, D_out]
-
-    print('final flag',torch.allclose(total_contrib, source_embedding, atol=1e-4))
-
-    # mismatch_mask = ~torch.isclose(total_contrib, source_embedding, atol=1e-4)
-    # mismatch_coords = mismatch_mask.nonzero(as_tuple=False)  # [N_mismatch, 2]
-    # print("不匹配数量:", mismatch_coords.shape[0])
-    # if mismatch_coords.numel() > 0:
-    #     for b_idx, o_idx in mismatch_coords:
-    #         pred = total_contrib[b_idx, o_idx].item()
-    #         true = source_embedding[b_idx, o_idx].item()
-    #         print(f"[b={b_idx}, o={o_idx}] pred={pred:.6f}, true={true:.6f}, diff={pred - true:+.3e}")
-
-    return source_embedding,C_source_node_features_to_semb,C_source_time_to_semb,C_neighbor_embeddings_to_semb,\
-           C_edge_time_embeddings_to_semb,C_edge_features_to_semb
+    cache = self._graph_sum_forward(
+        n_layer,
+        source_node_features,
+        source_nodes_time_embedding,
+        neighbor_embeddings,
+        edge_time_embeddings,
+        edge_features,
+    )
+    attribution = self._attribute_graph_sum_inputs(n_layer, cache)
+    return (
+        attribution.source_embedding,
+        attribution.source_node_features_to_semb,
+        attribution.source_time_to_semb,
+        attribution.neighbor_embeddings_to_semb,
+        attribution.edge_time_embeddings_to_semb,
+        attribution.edge_features_to_semb,
+    )
   def aggregate_without_contribution(self, n_layer, source_node_features, source_nodes_time_embedding,
                 neighbor_embeddings,
                 edge_time_embeddings, edge_features, mask):
-    source_node_features = source_node_features.double()
-    source_nodes_time_embedding = source_nodes_time_embedding.double()
-    neighbor_embeddings = neighbor_embeddings.double()
-    edge_time_embeddings = edge_time_embeddings.double()
-    edge_features = edge_features.double()
-    self.linear_1[n_layer - 1] = self.linear_1[n_layer - 1].double()
-    self.linear_2[n_layer - 1] = self.linear_2[n_layer - 1].double()
-
-    neighbors_features = torch.cat([neighbor_embeddings, edge_time_embeddings, edge_features],
-                                   dim=2)
-
-    # print('neighbor_embeddings',neighbor_embeddings.shape)
-    #
-    # print('neighbors_features',neighbors_features.shape)
-
-    nb_lin = self.linear_1[n_layer - 1](neighbors_features)
-
-
-    nb_sum_pre = nb_lin.sum(dim=1)  # [B, H1]
-    neighbors_sum = torch.nn.functional.relu(nb_sum_pre)  # [B, H1]
-
-
-    src_time = source_nodes_time_embedding.squeeze()  # [B, D_st]
-    source_features = torch.cat([source_node_features, src_time], dim=1)  # [B, D_sf+D_st]
-
-
-
-
-
-    z = torch.cat([neighbors_sum, source_features], dim=1)
-
-
-
-    source_embedding = self.linear_2[n_layer - 1](z)
-    return source_embedding
+    cache = self._graph_sum_forward(
+        n_layer,
+        source_node_features,
+        source_nodes_time_embedding,
+        neighbor_embeddings,
+        edge_time_embeddings,
+        edge_features,
+    )
+    return cache.source_embedding
 
   def init_hidden_embeddings(self, node_list):
       hidden_embeddings, masks = [], []
@@ -2044,6 +2123,225 @@ class GraphAttentionEmbedding(GraphEmbedding):
             )
             self.custom_attention_models[i].eval()
 
+  def _prepare_attention_mask(self, mask):
+      invalid_neighborhood_mask = mask.all(dim=1, keepdim=True)
+      mask_processed = mask.clone()
+      if invalid_neighborhood_mask.any():
+          mask_processed[invalid_neighborhood_mask.squeeze(1), 0] = False
+      return mask_processed
+
+  def _prepare_attention_io(self, source_node_features, source_nodes_time_embedding,
+                            neighbor_embeddings, edge_time_embeddings, edge_features):
+      src_node_features_unrolled = source_node_features.unsqueeze(1)
+      query = torch.cat([src_node_features_unrolled, source_nodes_time_embedding], dim=2)
+      key = torch.cat([neighbor_embeddings, edge_features, edge_time_embeddings], dim=2)
+      return query.permute(1, 0, 2), key.permute(1, 0, 2)
+
+  def _split_attention_contributions(self, C_query, C_key, C_value,
+                                     C_attn_to_final, C_src_to_final,
+                                     source_feature_dim, neighbor_feature_dim,
+                                     edge_feature_dim):
+      C_value_to_final = torch.einsum('nbdk,bko->nbdo', C_value, C_attn_to_final)
+      C_key_to_final = torch.einsum('nbdk,bko->nbdo', C_key, C_attn_to_final)
+      C_query_to_final = torch.einsum('nbdk,bko->nbdo', C_query, C_attn_to_final)
+
+      C_query_to_final_squeezed = C_query_to_final.squeeze(0)
+      C_source_node_features_to_final = (
+          C_query_to_final_squeezed[:, :source_feature_dim, :] + C_src_to_final
+      )
+      C_source_time_to_final = C_query_to_final_squeezed[:, source_feature_dim:, :]
+
+      edge_time_start = neighbor_feature_dim + edge_feature_dim
+      C_neighbor_embeddings_to_final = (
+          C_key_to_final[:, :, :neighbor_feature_dim, :] +
+          C_value_to_final[:, :, :neighbor_feature_dim, :]
+      ).permute(1, 0, 2, 3)
+      C_edge_features_to_final = (
+          C_key_to_final[:, :, neighbor_feature_dim:edge_time_start, :] +
+          C_value_to_final[:, :, neighbor_feature_dim:edge_time_start, :]
+      ).permute(1, 0, 2, 3)
+      C_edge_time_to_final = (
+          C_key_to_final[:, :, edge_time_start:, :] +
+          C_value_to_final[:, :, edge_time_start:, :]
+      ).permute(1, 0, 2, 3)
+
+      return (
+          C_source_node_features_to_final,
+          C_source_time_to_final,
+          C_neighbor_embeddings_to_final,
+          C_edge_time_to_final,
+          C_edge_features_to_final,
+      )
+
+  def _run_attention_layer(self, n_layer, source_node_features, source_nodes_time_embedding,
+                           neighbor_embeddings, edge_time_embeddings, edge_features,
+                           mask, explain_weights=None, with_contributions=False):
+      attention_model = self.attention_models[n_layer - 1]
+      attention_model_test = self.custom_attention_models[n_layer - 1]
+      query_perm, key_perm = self._prepare_attention_io(
+          source_node_features,
+          source_nodes_time_embedding,
+          neighbor_embeddings,
+          edge_time_embeddings,
+          edge_features,
+      )
+      mask_processed = self._prepare_attention_mask(mask)
+
+      if explain_weights is not None:
+          attn_output, attn_output_weights = attention_model_test.forward_weights(
+              query=query_perm,
+              key=key_perm,
+              value=key_perm,
+              key_padding_mask=mask_processed,
+              explain_weights=explain_weights,
+          )
+          attn_output = attn_output.squeeze()
+          final_output = attention_model.merger.forward(attn_output, source_node_features)
+          return final_output, attn_output_weights.squeeze()
+
+      if not with_contributions:
+          attn_output, _ = attention_model_test.forward(
+              query=query_perm,
+              key=key_perm,
+              value=key_perm,
+              key_padding_mask=mask_processed,
+          )
+          attn_output = attn_output.squeeze()
+          return attention_model.merger.forward(attn_output, source_node_features)
+
+      attn_output, _, C_query, C_key, C_value = attention_model_test.forward_withcontribution(
+          query=query_perm,
+          key=key_perm,
+          value=key_perm,
+          key_padding_mask=mask_processed,
+      )
+      attn_output = attn_output.squeeze()
+      final_output, C_attn_to_final, C_src_to_final = attention_model.merger.forward_with_contributions(
+          attn_output,
+          source_node_features,
+      )
+      return (final_output,) + self._split_attention_contributions(
+          C_query,
+          C_key,
+          C_value,
+          C_attn_to_final,
+          C_src_to_final,
+          source_node_features.shape[1],
+          neighbor_embeddings.shape[2],
+          edge_features.shape[2],
+      )
+
+  def _build_unrolled_context(self, source_nodes, timestamps, n_layers, n_neighbors):
+      effective_n_neighbors = n_neighbors if n_neighbors > 0 else 1
+      root_batch_size = len(source_nodes)
+
+      nodes_per_depth = [np.asarray(source_nodes)]
+      timestamps_per_depth = [np.asarray(timestamps)]
+      neighbors_per_depth = []
+      edge_idxs_per_depth = []
+      masks_per_depth = []
+      edge_deltas_per_depth = []
+      root_batch_indices_per_depth = [np.arange(root_batch_size)]
+      top_neighbor_slots_per_depth = [np.full(root_batch_size, -1, dtype=np.int64)]
+
+      current_nodes = np.asarray(source_nodes)
+      current_timestamps = np.asarray(timestamps)
+      current_root_batch_indices = np.arange(root_batch_size)
+      current_top_neighbor_slots = np.full(root_batch_size, -1, dtype=np.int64)
+
+      for layer_idx in range(n_layers):
+          neighbors, edge_idxs, edge_times = self.neighbor_finder.get_temporal_neighbor(
+              current_nodes,
+              current_timestamps,
+              n_neighbors=n_neighbors,
+          )
+          neighbors_per_depth.append(neighbors)
+          edge_idxs_per_depth.append(edge_idxs)
+          masks_per_depth.append(neighbors == 0)
+          edge_deltas_per_depth.append(current_timestamps[:, np.newaxis] - edge_times)
+
+          current_nodes = neighbors.flatten()
+          current_timestamps = np.repeat(current_timestamps, effective_n_neighbors)
+          current_root_batch_indices = np.repeat(current_root_batch_indices, effective_n_neighbors)
+          if layer_idx == 0:
+              current_top_neighbor_slots = np.tile(
+                  np.arange(effective_n_neighbors, dtype=np.int64),
+                  len(neighbors),
+              )
+          else:
+              current_top_neighbor_slots = np.repeat(current_top_neighbor_slots, effective_n_neighbors)
+
+          nodes_per_depth.append(current_nodes)
+          timestamps_per_depth.append(current_timestamps)
+          root_batch_indices_per_depth.append(current_root_batch_indices)
+          top_neighbor_slots_per_depth.append(current_top_neighbor_slots)
+
+      return {
+          'effective_n_neighbors': effective_n_neighbors,
+          'nodes_per_depth': nodes_per_depth,
+          'timestamps_per_depth': timestamps_per_depth,
+          'neighbors_per_depth': neighbors_per_depth,
+          'edge_idxs_per_depth': edge_idxs_per_depth,
+          'masks_per_depth': masks_per_depth,
+          'edge_deltas_per_depth': edge_deltas_per_depth,
+          'root_batch_indices_per_depth': root_batch_indices_per_depth,
+          'top_neighbor_slots_per_depth': top_neighbor_slots_per_depth,
+          'root_batch_size': root_batch_size,
+      }
+
+  def _initialize_unrolled_embeddings(self, memory, context):
+      embeddings = []
+      raw_node_features = []
+      source_time_embeddings = []
+      for depth_nodes, depth_timestamps in zip(
+          context['nodes_per_depth'],
+          context['timestamps_per_depth'],
+      ):
+          depth_nodes_torch = torch.from_numpy(depth_nodes).long().to(self.device)
+          depth_timestamps_torch = torch.unsqueeze(
+              torch.from_numpy(depth_timestamps).float().to(self.device),
+              dim=1,
+          )
+          raw_features = self.node_features[depth_nodes_torch, :]
+          base_embedding = raw_features.clone()
+          if self.use_memory:
+              base_embedding = base_embedding + memory[depth_nodes, :]
+          embeddings.append(base_embedding)
+          raw_node_features.append(raw_features)
+          source_time_embeddings.append(self.time_encoder(torch.zeros_like(depth_timestamps_torch)))
+      return embeddings, raw_node_features, source_time_embeddings
+
+  def _map_leaf_contributions_to_temporal_edges_attention(self, C_source_time, C_edge_time_embeddings,
+                                                          C_edge_features, edge_idxs):
+      B, K, _, _ = C_edge_time_embeddings.shape
+      edge_contributions_dict = {}
+      for b in range(B):
+          edge_contributions_dict[b] = {}
+          add_from_source = C_source_time[b].sum(dim=0) / K
+          for k in range(K):
+              edge_idx = edge_idxs[b, k]
+              edge_total_contrib = (
+                  C_edge_time_embeddings[b, k].sum(dim=0) +
+                  C_edge_features[b, k].sum(dim=0) +
+                  add_from_source
+              )
+              if edge_idx in edge_contributions_dict[b]:
+                  edge_contributions_dict[b][edge_idx] += edge_total_contrib
+              else:
+                  edge_contributions_dict[b][edge_idx] = edge_total_contrib
+      return edge_contributions_dict
+
+  def _accumulate_temporal_edge_contributions(self, temporal_edge_contributions, layer_temporal,
+                                              root_batch_indices):
+      for batch_idx, contribs in layer_temporal.items():
+          root_batch_idx = int(root_batch_indices[batch_idx])
+          if root_batch_idx not in temporal_edge_contributions:
+              temporal_edge_contributions[root_batch_idx] = {}
+          for edge_idx, contrib in contribs.items():
+              if edge_idx in temporal_edge_contributions[root_batch_idx]:
+                  temporal_edge_contributions[root_batch_idx][edge_idx] += contrib
+              else:
+                  temporal_edge_contributions[root_batch_idx][edge_idx] = contrib.clone()
 
   def aggregate_explainweights(
           self,
@@ -2055,675 +2353,287 @@ class GraphAttentionEmbedding(GraphEmbedding):
           edge_features,
           mask,explain_weights=None
   ):
-      """Baseline aggregation method for GraphAttentionEmbedding.
-      Similar to aggregate_without_contribution but returns (source_embedding, None) format.
-      """
-      attention_model = self.attention_models[n_layer - 1]
-
-      B = source_node_features.shape[0]  # batch size
-      K = neighbor_embeddings.shape[1]  # number of neighbors
-      D_n = neighbor_embeddings.shape[2]  # neighbor embedding dim
-      D_e = edge_features.shape[2]  # edge feature dim
-      D_t = edge_time_embeddings.shape[2]  # time embedding dim
-      D_s = source_node_features.shape[1]  # source node feature dim
-
-      src_node_features_unrolled = torch.unsqueeze(source_node_features, dim=1)  # [B, 1, D_s]
-      query = torch.cat([src_node_features_unrolled, source_nodes_time_embedding], dim=2)  # [B, 1, D_s + D_t]
-      key = torch.cat([neighbor_embeddings, edge_features, edge_time_embeddings], dim=2)  # [B, K, D_n + D_e + D_t]
-
-      query_perm = query.permute([1, 0, 2])  # [1, B, D_s + D_t]
-      key_perm = key.permute([1, 0, 2])  # [K, B, D_n + D_e + D_t]
-
-      mask_bool = mask < 0  # True for positions to mask out
-
-      invalid_neighborhood_mask = mask_bool.all(dim=1, keepdim=True)
-      mask_processed = mask_bool.clone()
-      # If a source node has no valid neighbor, set its first neighbor to be valid
-      mask_processed[invalid_neighborhood_mask.squeeze(), 0] = False
-
-      attention_model_test = self.custom_attention_models[n_layer - 1]
-
-      attn_output, attn_output_weights = attention_model_test.forward_weights(
-          query=query_perm,
-          key=key_perm,
-          value=key_perm,
-          key_padding_mask=mask_processed,explain_weights=explain_weights
+      return self._run_attention_layer(
+          n_layer,
+          source_node_features,
+          source_nodes_time_embedding,
+          neighbor_embeddings,
+          edge_time_embeddings,
+          edge_features,
+          mask,
+          explain_weights=explain_weights,
       )
-
-      attn_output = attn_output.squeeze()  # [B, D_s + D_t]
-      attn_output_weights = attn_output_weights.squeeze()  # [B, K] or [B, 1, K] -> [B, K]
-
-      final_output = attention_model.merger.forward(
-          attn_output, source_node_features
-      )
-
-      return final_output, attn_output_weights
 
   def aggregate(self, n_layer, source_node_features, source_nodes_time_embedding,
                 neighbor_embeddings,
                 edge_time_embeddings, edge_features, mask):
-    attention_model = self.attention_models[n_layer - 1]
-
-    # source_node_features = source_node_features.double()
-    # source_nodes_time_embedding = source_nodes_time_embedding.double()
-    # neighbor_embeddings = neighbor_embeddings.double()
-    # edge_time_embeddings = edge_time_embeddings.double()
-    # edge_features = edge_features.double()
-
-    B = source_node_features.shape[0]  # batch size
-    K = neighbor_embeddings.shape[1]  # number of neighbors
-    D_n = neighbor_embeddings.shape[2]  # neighbor embedding dim
-    D_e = edge_features.shape[2]  # edge feature dim
-    D_t = edge_time_embeddings.shape[2]  # time embedding dim
-    D_s = source_node_features.shape[1]  # source node feature dim
-
-    print('B',B)
-    print('K', K)
-    print('D_n',D_n)
-    print('D_e', D_e)
-    print('D_t',D_t)
-    print('D_s', D_s)
-
-    print('edge_time_embeddings.shape',edge_time_embeddings.shape)
-
-    src_node_features_unrolled = torch.unsqueeze(source_node_features, dim=1)  # [B, 1, D_s]
-    query = torch.cat([src_node_features_unrolled, source_nodes_time_embedding], dim=2)  # [B, 1, D_s + D_t]
-    key = torch.cat([neighbor_embeddings, edge_features, edge_time_embeddings], dim=2)  # [B, K, D_n + D_e + D_t]
-
-    query_perm = query.permute([1, 0, 2])  # [1, B, D_s + D_t]
-    key_perm = key.permute([1, 0, 2])  # [K, B, D_n + D_e + D_t]
-
-    print('query_perm',query_perm.shape)
-    print('key_perm',key_perm.shape)
-
-    invalid_neighborhood_mask = mask.all(dim=1, keepdim=True)
-    mask_processed = mask.clone()
-    mask_processed[invalid_neighborhood_mask.squeeze(), 0] = False
-
-    # attn_output, attn_output_weights = attention_model.multi_head_target(
-    #     query=query_perm,
-    #     key=key_perm,
-    #     value=key_perm,
-    #     key_padding_mask=mask_processed
-    # )
-    # # print('attn_output.shape',attn_output.shape)
-    #
-    # print('attn_output.real', attn_output)
-
-    query_dim = D_s + D_t  # query 的维度
-    key_dim = D_n + D_e + D_t  # key 的维度
-
-    # 从 attention_model 获取 n_head 和 dropout
-    n_head = attention_model.n_head
-    dropout = attention_model.multi_head_target.dropout.p if hasattr(attention_model.multi_head_target.dropout,
-                                                                     'p') else 0
-
-
-
-    # attention_model_test = CustomMultiHeadAttention(
-    #     embed_dim=query_dim,
-    #     num_heads=n_head,
-    #     kdim=key_dim,
-    #     vdim=key_dim,
-    #     dropout=dropout
-    # )
-    #
-    # attention_model_test.load_state_from_pytorch_mha(attention_model.multi_head_target)
-    #
-    # attention_model_test.eval()
-
-    attention_model_test = self.custom_attention_models[n_layer - 1]
-
-    attn_output, attn_output_weights,C_query,C_key,C_value = attention_model_test.forward_withcontribution(
-        query=query_perm,
-        key=key_perm,
-        value=key_perm,
-        key_padding_mask=mask_processed
-    )
-
-    print('attn_output.test',attn_output)
-
-
-    test_sum=C_value.sum(dim=(0, 2)) + C_key.sum(dim=(0, 2)) + C_query.sum(dim=(0, 2))
-
-    #
-    is_conserved_value = torch.allclose(
-        test_sum,
-        torch.ones_like(test_sum),
-        atol=1e-5,
-        rtol=1e-5
-    )
-    # print('C_value',C_value.shape)
-    # print('C_key', C_key.shape)
-    # print('C_query', C_query.shape)
-    #
-    print(f'attn_output  验证 守恒: {is_conserved_value}')
-    #
-    # print('attn_output.custo', attn_output)
-
-    attn_output = attn_output.squeeze()  # [B, D_s + D_t]
-    # print('attn_output.shape', attn_output.shape)
-    attn_output_weights = attn_output_weights.squeeze()  # [B, K] or [B, 1, K] -> [B, K]
-
-    # print('attn_output_weights', attn_output_weights.shape)
-
-
-
-    # 处理无效邻居
-    # attn_output = attn_output.masked_fill(invalid_neighborhood_mask, 0)
-    # attn_output_weights = attn_output_weights.masked_fill(invalid_neighborhood_mask, 0)
-
-    # attn_output.masked_fill(invalid_neighborhood_mask, 0)
-    # attn_output_weights.masked_fill(invalid_neighborhood_mask, 0)
-    #
-    # C_query.masked_fill(invalid_neighborhood_mask.unsqueeze(-1).unsqueeze(-1), 0)
-    # C_key.masked_fill(invalid_neighborhood_mask.unsqueeze(-1).unsqueeze(-1), 0)
-    # C_value.masked_fill(invalid_neighborhood_mask.unsqueeze(-1).unsqueeze(-1), 0)
-
-
-    final_output, C_attn_to_final, C_src_to_final = attention_model.merger.forward_with_contributions(
-        attn_output, source_node_features
-    )
-
-    is_conserved_value = torch.allclose(
-        C_attn_to_final.sum(dim=(1)) + C_src_to_final.sum(dim=(1)),
-        final_output,
-        atol=1e-5,
-        rtol=1e-5
-    )
-
-    print(f'test mlp  验证 守恒: {is_conserved_value}')
-
-
-
-
-
-    # print('attn_output.shape',attn_output.shape)
-    #
-    print('C_src_to_final.shape',C_src_to_final.shape)
-    print('C_attn_to_final',C_attn_to_final.shape)
-    #
-    # print('final_output', final_output.shape)
-
-
-
-    # C_value_to_attn = C_value.sum(dim=2)
-
-    # print('C_value_to_attn',C_value[0].shape)
-
-    C_value_to_final = torch.einsum('hbdk,bko->hbdo', C_value, C_attn_to_final)
-
-    # print('C_value_to_final',C_value_to_final.shape)
-
-    C_key_to_final = torch.einsum('hbdk,bko->hbdo', C_key, C_attn_to_final)
-    # print('C_key_to_final', C_key_to_final.shape)
-
-    C_query_to_final = torch.einsum('hbdk,bko->hbdo', C_query, C_attn_to_final)
-    # print('C_query_to_final', C_query_to_final.shape)
-
-    is_conserved_value = torch.allclose(
-        C_value_to_final.sum(dim=(0, 2)) + C_key_to_final.sum(dim=(0, 2)) + C_query_to_final.sum(dim=(0, 2)),
-        final_output,
-        atol=1e-5,
-        rtol=1e-5
-    )
-
-    print(f'without shape  验证 守恒: {is_conserved_value}')
-
-    #
-    # print(f'final output  验证 守恒: {is_conserved_value}')
-    #
-    # print('query_perm', query_perm.shape)
-    # print('key_perm', key_perm.shape)
-
-    C_query_to_final_squeezed = C_query_to_final.squeeze(0)  #
-
-    # print('C_query_to_final_squeezed',C_query_to_final_squeezed.shape)
-
-    C_source_node_features_to_final = C_query_to_final_squeezed[  :,:D_s, :]+C_src_to_final
-
-
-
-
-    # source_nodes_time_embedding 的贡献（后 D_t 维）
-    C_source_time_to_final = C_query_to_final_squeezed[ :, D_s:, :]  # [10, 300, D_t, 32]
-
-
-
-    C_neighbor_embeddings_to_final_from_key = C_key_to_final[:, :, :D_n, :]  # [10, 300, D_n, 32]
-    C_neighbor_embeddings_to_final_from_value = C_value_to_final[:, :, :D_n, :]  # [10, 300, D_n, 32]
-
-    C_edge_features_to_final_from_key = C_key_to_final[:, :, D_n:D_n + D_e, :]  # [10, 300, D_e, 32]
-    C_edge_features_to_final_from_value = C_value_to_final[:, :, D_n:D_n + D_e, :]  # [10, 300, D_e, 32]
-
-    C_edge_time_to_final_from_key = C_key_to_final[:, :, D_n + D_e:, :]  # [10, 300, D_t, 32]
-    C_edge_time_to_final_from_value = C_value_to_final[:, :, D_n + D_e:, :]  # [10, 300, D_t, 32]
-
-    C_neighbor_embeddings_to_final = C_neighbor_embeddings_to_final_from_key + C_neighbor_embeddings_to_final_from_value  # [10, 300, D_n, 32]
-    C_edge_features_to_final = C_edge_features_to_final_from_key + C_edge_features_to_final_from_value  # [10, 300, D_e, 32]
-    C_edge_time_to_final = C_edge_time_to_final_from_key + C_edge_time_to_final_from_value  # [10, 300, D_t, 32]
-
-    print('C_neighbor_embeddings_to_final',C_neighbor_embeddings_to_final.shape)
-    print('C_edge_features_to_final',C_edge_features_to_final.shape)
-    print('C_edge_time_to_final',C_edge_time_to_final.shape)
-    print('C_source_node_features_to_final', C_source_node_features_to_final.shape)
-    print('C_source_time_to_final', C_source_time_to_final.shape)
-
-
-
-    C_neighbor_embeddings_to_final =C_neighbor_embeddings_to_final.permute(1,0,2,3)
-
-    C_edge_features_to_final = C_edge_features_to_final.permute(1, 0, 2, 3)
-
-    C_edge_time_to_final = C_edge_time_to_final.permute(1, 0, 2, 3)
-
-    is_conserved_value = torch.allclose(
-        C_neighbor_embeddings_to_final.sum(dim=(1, 2)) + C_edge_features_to_final.sum(
-            dim=(1, 2)) + C_edge_time_to_final.sum(dim=(1, 2)) \
-        + C_source_node_features_to_final.sum(dim=1) + C_source_time_to_final.sum(dim=1),
-        final_output,
-        atol=1e-4,
-        rtol=1e-4
-    )
-
-    print(f'contribution output  验证 守恒: {is_conserved_value}')
-
-
-
-
-    return final_output,C_source_node_features_to_final, C_source_time_to_final,\
-        C_neighbor_embeddings_to_final,C_edge_time_to_final,C_edge_features_to_final
-
+      return self._run_attention_layer(
+          n_layer,
+          source_node_features,
+          source_nodes_time_embedding,
+          neighbor_embeddings,
+          edge_time_embeddings,
+          edge_features,
+          mask,
+          with_contributions=True,
+      )
 
   def aggregate_without_contribution(self, n_layer, source_node_features, source_nodes_time_embedding,
                                      neighbor_embeddings,
                                      edge_time_embeddings, edge_features, mask):
-      """与 aggregate 方法类似，但不返回贡献信息"""
-      attention_model = self.attention_models[n_layer - 1]
-
-
-
-      B = source_node_features.shape[0]  # batch size
-      K = neighbor_embeddings.shape[1]  # number of neighbors
-      D_n = neighbor_embeddings.shape[2]  # neighbor embedding dim
-      D_e = edge_features.shape[2]  # edge feature dim
-      D_t = edge_time_embeddings.shape[2]  # time embedding dim
-      D_s = source_node_features.shape[1]  # source node feature dim
-
-      print('B', B)
-      print('K', K)
-      print('D_n', D_n)
-      print('D_e', D_e)
-      print('D_t', D_t)
-      print('D_s', D_s)
-
-      src_node_features_unrolled = torch.unsqueeze(source_node_features, dim=1)  # [B, 1, D_s]
-      query = torch.cat([src_node_features_unrolled, source_nodes_time_embedding], dim=2)  # [B, 1, D_s + D_t]
-      key = torch.cat([neighbor_embeddings, edge_features, edge_time_embeddings], dim=2)  # [B, K, D_n + D_e + D_t]
-
-      query_perm = query.permute([1, 0, 2])  # [1, B, D_s + D_t]
-      key_perm = key.permute([1, 0, 2])  # [K, B, D_n + D_e + D_t]
-
-      print('query_perm', query_perm.shape)
-      print('key_perm', key_perm.shape)
-
-      invalid_neighborhood_mask = mask.all(dim=1, keepdim=True)
-      mask_processed = mask.clone()
-      mask_processed[invalid_neighborhood_mask.squeeze(), 0] = False
-
-      # attn_output, attn_output_weights = attention_model.multi_head_target(
-      #     query=query_perm,
-      #     key=key_perm,
-      #     value=key_perm,
-      #     key_padding_mask=mask_processed
-      # )
-      # print('attn_output.shape',attn_output.shape)
-
-      # print('attn_output.real', attn_output)
-
-      query_dim = D_s + D_t  # query 的维度
-      key_dim = D_n + D_e + D_t  # key 的维度
-
-      # 从 attention_model 获取 n_head 和 dropout
-      n_head = attention_model.n_head
-      dropout = attention_model.multi_head_target.dropout.p if hasattr(attention_model.multi_head_target.dropout,
-                                                                       'p') else 0
-
-      # attention_model_test = CustomMultiHeadAttention(
-      #     embed_dim=query_dim,
-      #     num_heads=n_head,
-      #     kdim=key_dim,
-      #     vdim=key_dim,
-      #     dropout=dropout
-      # )
-      #
-      # attention_model_test.load_state_from_pytorch_mha(attention_model.multi_head_target)
-      #
-      # attention_model_test.eval()
-
-      attention_model_test = self.custom_attention_models[n_layer - 1]
-
-      attn_output, attn_output_weights, = attention_model_test.forward(
-          query=query_perm,
-          key=key_perm,
-          value=key_perm,
-          key_padding_mask=mask_processed
+      return self._run_attention_layer(
+          n_layer,
+          source_node_features,
+          source_nodes_time_embedding,
+          neighbor_embeddings,
+          edge_time_embeddings,
+          edge_features,
+          mask,
+          with_contributions=False,
       )
-
-
-
-      attn_output = attn_output.squeeze()  # [B, D_s + D_t]
-      # print('attn_output.shape', attn_output.shape)
-      attn_output_weights = attn_output_weights.squeeze()  # [B, K] or [B, 1, K] -> [B, K]
-
-
-      final_output = attention_model.merger.forward(
-          attn_output, source_node_features
-      )
-
-
-
-      return final_output,attn_output_weights
-
 
   def compute_embedding_attention(self, memory, source_nodes, timestamps, n_layers, n_neighbors=20):
-      B = len(source_nodes)
-      # print('source nodes',source_nodes)
-      source_nodes_torch = torch.from_numpy(source_nodes).long().to(self.device)
-      timestamps_torch = torch.unsqueeze(torch.from_numpy(timestamps).float().to(self.device), dim=1)
+      assert n_layers >= 0
+      context = self._build_unrolled_context(source_nodes, timestamps, n_layers, n_neighbors)
+      embeddings, raw_node_features, source_time_embeddings = self._initialize_unrolled_embeddings(
+          memory,
+          context,
+      )
 
-      raw_source_node_features = self.node_features[source_nodes_torch, :]  # [B, D_node]
+      layer_caches = [[None for _ in range(n_layers + 1)] for _ in range(n_layers)]
+      final_embedding = embeddings[0]
+      top_neighbors = np.zeros(
+          (context['root_batch_size'], context['effective_n_neighbors']),
+          dtype=np.int64,
+      )
+      top_edge_idxs = np.zeros_like(top_neighbors)
 
-      print('raw_source_node_features', raw_source_node_features.shape)
+      for remaining_layers in range(1, n_layers + 1):
+          for depth in range(0, n_layers - remaining_layers + 1):
+              batch_size = len(context['nodes_per_depth'][depth])
+              edge_idxs = context['edge_idxs_per_depth'][depth]
+              edge_idxs_torch = torch.from_numpy(edge_idxs).long().to(self.device)
+              edge_deltas_torch = torch.from_numpy(
+                  context['edge_deltas_per_depth'][depth]
+              ).float().to(self.device)
+              mask = torch.from_numpy(context['masks_per_depth'][depth]).to(self.device)
 
-      # 最底层：静态特征 + memory（可选）
-      h = raw_source_node_features.clone()
-      if self.use_memory:
-          h = h + memory[source_nodes, :]
+              aggregated = self.aggregate(
+                  remaining_layers,
+                  embeddings[depth],
+                  source_time_embeddings[depth],
+                  embeddings[depth + 1].view(batch_size, context['effective_n_neighbors'], -1),
+                  self.time_encoder(edge_deltas_torch),
+                  self.edge_features[edge_idxs_torch, :],
+                  mask,
+              )
+              embeddings[depth] = aggregated[0]
+              layer_caches[depth][remaining_layers] = {
+                  'output_embedding': aggregated[0],
+                  'source_contrib': aggregated[1],
+                  'source_time_contrib': aggregated[2],
+                  'neighbor_contrib': aggregated[3],
+                  'edge_time_contrib': aggregated[4],
+                  'edge_feature_contrib': aggregated[5],
+                  'neighbors': context['neighbors_per_depth'][depth],
+                  'edge_idxs': edge_idxs,
+                  'timestamps': context['timestamps_per_depth'][depth],
+              }
 
-      # 初始时间编码（始终为0，因为是 query 节点当前时间）
-      source_nodes_time_embedding = self.time_encoder(torch.zeros_like(timestamps_torch))  # [B, Dₜ]
+              if depth == 0 and remaining_layers == n_layers:
+                  final_embedding = aggregated[0]
+                  top_neighbors = context['neighbors_per_depth'][depth]
+                  top_edge_idxs = edge_idxs
 
-      # print('source_nodes_time_embedding',source_nodes_time_embedding)
+      output_dim = final_embedding.shape[1]
+      output_dtype = final_embedding.dtype
+      output_device = final_embedding.device
+      final_source_memory_features = torch.zeros(
+          context['root_batch_size'],
+          raw_node_features[0].shape[1],
+          output_dim,
+          dtype=output_dtype,
+          device=output_device,
+      )
+      top_neighbor_memory_features = torch.zeros(
+          context['root_batch_size'],
+          context['effective_n_neighbors'],
+          raw_node_features[0].shape[1],
+          output_dim,
+          dtype=output_dtype,
+          device=output_device,
+      )
+      downstream = [[None for _ in range(n_layers + 1)] for _ in range(n_layers + 1)]
+      downstream[0][n_layers] = torch.diag_embed(final_embedding).to(
+          dtype=output_dtype,
+          device=output_device,
+      )
+      temporal_edge_contributions = {}
 
-      for layer in range(n_layers):
-          # 采样邻居（每一层用当前 query 时间采样）
-          neighbors, edge_idxs, edge_times = self.neighbor_finder.get_temporal_neighbor(
-              source_nodes, timestamps, n_neighbors=n_neighbors
-          )
+      for remaining_layers in range(n_layers, 0, -1):
+          for depth in range(0, n_layers - remaining_layers + 1):
+              downstream_current = downstream[depth][remaining_layers]
+              if downstream_current is None:
+                  continue
 
-          # print('neighbors',neighbors,neighbors.shape)
-          # print('edge_idxs',edge_idxs,edge_idxs.shape)
-          # print('edge_times',edge_times)
+              cache = layer_caches[depth][remaining_layers]
+              if cache is None:
+                  continue
 
-          neighbors_torch = torch.from_numpy(neighbors).long().to(self.device)
-          # print('neighbors_torch',neighbors_torch)
-          edge_idxs_torch = torch.from_numpy(edge_idxs).long().to(self.device)
-          edge_deltas = timestamps[:, np.newaxis] - edge_times
+              output_embedding = cache['output_embedding']
+              output_den_source = output_embedding.unsqueeze(1)
+              output_den_neighbor = output_embedding.unsqueeze(1).unsqueeze(1)
 
-          # print('timestamps',timestamps)
+              source_share = torch.where(
+                  output_den_source != 0,
+                  cache['source_contrib'] / output_den_source,
+                  torch.zeros_like(cache['source_contrib']),
+              )
+              source_time_share = torch.where(
+                  output_den_source != 0,
+                  cache['source_time_contrib'] / output_den_source,
+                  torch.zeros_like(cache['source_time_contrib']),
+              )
+              neighbor_share = torch.where(
+                  output_den_neighbor != 0,
+                  cache['neighbor_contrib'] / output_den_neighbor,
+                  torch.zeros_like(cache['neighbor_contrib']),
+              )
+              edge_time_share = torch.where(
+                  output_den_neighbor != 0,
+                  cache['edge_time_contrib'] / output_den_neighbor,
+                  torch.zeros_like(cache['edge_time_contrib']),
+              )
+              edge_feat_share = torch.where(
+                  output_den_neighbor != 0,
+                  cache['edge_feature_contrib'] / output_den_neighbor,
+                  torch.zeros_like(cache['edge_feature_contrib']),
+              )
 
-          # print('edge_deltas',edge_deltas,edge_deltas.shape)
+              source_to_top = torch.einsum('bid,bdo->bio', source_share, downstream_current)
+              source_time_to_top = torch.einsum('bid,bdo->bio', source_time_share, downstream_current)
+              neighbor_to_top = torch.einsum('bkid,bdo->bkio', neighbor_share, downstream_current)
+              edge_time_to_top = torch.einsum('bkid,bdo->bkio', edge_time_share, downstream_current)
+              edge_feat_to_top = torch.einsum('bkid,bdo->bkio', edge_feat_share, downstream_current)
+              root_batch_indices = context['root_batch_indices_per_depth'][depth]
 
-          edge_deltas_torch = torch.from_numpy(edge_deltas).float().to(self.device)
+              if remaining_layers > 1:
+                  layer_temporal = self._map_leaf_contributions_to_temporal_edges_attention(
+                      source_time_to_top,
+                      edge_time_to_top,
+                      edge_feat_to_top,
+                      cache['edge_idxs'],
+                  )
+                  self._accumulate_temporal_edge_contributions(
+                      temporal_edge_contributions,
+                      layer_temporal,
+                      root_batch_indices,
+                  )
 
-          # 获取邻居嵌入（从上一层）
-          flat_neighbors = neighbors.flatten()
-          print('flat_neighbors ', len(flat_neighbors))
-          h_neighbors = self.node_features[flat_neighbors, :]
-          if self.use_memory:
-              h_neighbors = h_neighbors + memory[flat_neighbors, :]
-          print('h_neighbors ', h_neighbors.shape)
+              if remaining_layers == 1:
+                  source_raw_features, source_memory_features = self.allocate_source_contributions(
+                      source_to_top,
+                      raw_node_features[depth],
+                      memory,
+                      context['nodes_per_depth'][depth],
+                  )
+                  neighbor_raw_features, neighbor_memory_features = self.allocate_neighbor_contributions(
+                      neighbor_to_top,
+                      cache['neighbors'].flatten(),
+                      memory,
+                  )
 
-          h_neighbors = h_neighbors.view(B, n_neighbors, -1)
+                  source_memory_features = source_memory_features.to(dtype=output_dtype, device=output_device)
+                  neighbor_memory_features = neighbor_memory_features.to(dtype=output_dtype, device=output_device)
 
-          print('h_neighbors', h_neighbors.shape)
+                  top_neighbor_slots = context['top_neighbor_slots_per_depth'][depth]
+                  for batch_idx, root_batch_idx in enumerate(root_batch_indices):
+                      root_batch_idx = int(root_batch_idx)
+                      if depth == 0:
+                          final_source_memory_features[root_batch_idx] += source_memory_features[batch_idx]
+                          for neighbor_idx in range(context['effective_n_neighbors']):
+                              top_neighbor_memory_features[root_batch_idx, neighbor_idx] += (
+                                  neighbor_memory_features[batch_idx, neighbor_idx]
+                              )
+                      else:
+                          top_slot = int(top_neighbor_slots[batch_idx])
+                          if top_slot >= 0:
+                              top_neighbor_memory_features[root_batch_idx, top_slot] += (
+                                  source_memory_features[batch_idx] +
+                                  neighbor_memory_features[batch_idx].sum(dim=0)
+                              )
 
-          # 时间编码与边特征
-          edge_time_embeddings = self.time_encoder(edge_deltas_torch)  # [B, N, Dₜ]
-          print('edge_time_embeddings', edge_time_embeddings.shape)
-          edge_features = self.edge_features[edge_idxs_torch, :]  # [B, N, Dₑ]
-          print('edge_features', edge_features.shape)
-          mask = neighbors_torch == 0  # [B, N]
+                  layer_temporal = self.map_contributions_to_temporal_edges_attention(
+                      source_raw_features,
+                      source_time_to_top,
+                      neighbor_raw_features,
+                      edge_time_to_top,
+                      edge_feat_to_top,
+                      context['nodes_per_depth'][depth],
+                      cache['neighbors'],
+                      cache['edge_idxs'],
+                      cache['timestamps'],
+                  )
+                  self._accumulate_temporal_edge_contributions(
+                      temporal_edge_contributions,
+                      layer_temporal,
+                      root_batch_indices,
+                  )
+                  continue
 
-          # 聚合：本层嵌入 = f(hᶫ⁻¹, neighbors)
-          h, C_source_h, C_source_time, C_neighbor_embeddings, \
-              C_edge_time_embeddings, C_edge_features = self.aggregate(layer + 1, h,
-                                                                       source_nodes_time_embedding,
-                                                                       h_neighbors,
-                                                                       edge_time_embeddings,
-                                                                       edge_features,
-                                                                       mask)
-
-          print('C_neighbor_embeddings.shape',C_neighbor_embeddings.shape)
-
-          # print('layer+1',layer+1)
-      if self.use_memory:
-          C_raw_features, C_memory_features = self.allocate_source_contributions(
-              C_source_h, raw_source_node_features, memory, source_nodes
-          )
-          # print(C_raw_features.shape)
-          # print(C_memory_features.shape)
-          #
-          # print(C_source_h.shape)
-
-          total_source_contrib = C_raw_features.sum(dim=1) + C_memory_features.sum(dim=1)
-          expected_total = C_source_h.sum(dim=1)
-          check = torch.allclose(total_source_contrib, expected_total, atol=1e-8, rtol=1e-8)
-          print(f"  分配验证: {'通过' if check else '失败'}")
-
-          C_neighbor_raw_features, C_neighbor_memory_features = self.allocate_neighbor_contributions(
-              C_neighbor_embeddings, flat_neighbors, memory
-          )
-
-          print('C_neighbor_memory_features', C_neighbor_memory_features.shape)
-
-          total_neighbor_contrib = C_neighbor_raw_features.sum(dim=(1, 2)) + C_neighbor_memory_features.sum(dim=(1, 2))
-          expected_neighbor_total = C_neighbor_embeddings.sum(dim=(1, 2))
-          neighbor_check = torch.allclose(total_neighbor_contrib, expected_neighbor_total, atol=1e-8, rtol=1e-8)
-          print(f"  邻居贡献值分配验证: {'通过' if neighbor_check else '失败'}")
-
-      temporal_edge_contributions = self.map_contributions_to_temporal_edges_attention(C_raw_features, C_source_time,
-                                                                             C_neighbor_raw_features,
-                                                                             C_edge_time_embeddings, C_edge_features,
-                                                                             source_nodes, neighbors, edge_idxs,
-                                                                             timestamps
-                                                                             )
-
-      # C_neighbor_memory_dict=dict()
-
-      # print('temporal_edge_contributions',temporal_edge_contributions)
-      # print('edge_info_list',edge_info_list)
-
-      # 处理邻居贡献值（新增部分）
-      C_neighbor_message_to_memory_features = dict()
-      C_neighbor_old_memory_to_memory_features = dict()
-      neighbor_memory_verify = True
-
-      # if C_message is not None and C_memory is not None and self.use_memory:
-      #     C_neighbor_memory_features = C_neighbor_memory_features.to(torch.float64)
-      #
-      #     # 使用最后一层的neighbors信息（已经在循环中获取）
-      #     # neighbors: [B, K], edge_idxs: [B, K]
-      #
-      #     # 遍历每个源节点和其邻居
-      #     for b in range(len(source_nodes)):
-      #         node_neighbors = neighbors[b]  # 直接使用已有的neighbors
-      #         for k, neighbor_node in enumerate(node_neighbors):
-      #             edge_idx = edge_idxs[b, k]
-      #
-      #             C_neighbor_memory_dict[str(source_nodes[b].item())+','+str(neighbor_node.item())+','+str(edge_idx.item())]=C_neighbor_memory_features[b, k]
-      #
-      #
-      #             if neighbor_node in C_message:
-      #                 v = C_message[neighbor_node].to(
-      #                     dtype=C_neighbor_memory_features.dtype,
-      #                     device=C_neighbor_memory_features.device
-      #                 )
-      #
-      #                 u = C_memory[neighbor_node].to(
-      #                     dtype=C_neighbor_memory_features.dtype,
-      #                     device=C_neighbor_memory_features.device
-      #                 )
-      #                 # 获取对应的neighbor memory features
-      #                 neighbor_memory_feature = C_neighbor_memory_features[b, k]  # [D_n, D_out]
-      #
-      #                 # print('neighbor_memory_feature',neighbor_memory_feature.shape)
-      #                 # print('v.shape',v.shape)
-      #                 # print('u.shape', u.shape)
-      #
-      #                 C_neighbor_message_to_memory_features[edge_idx] = v @ neighbor_memory_feature
-      #
-      #                 C_neighbor_old_memory_to_memory_features[edge_idx] = u @ neighbor_memory_feature
-      #
-      #                 # test1=(v @ neighbor_memory_feature).sum(dim=0) + (u @ neighbor_memory_feature).sum(dim=0)
-      #                 # test2=neighbor_memory_feature.sum(dim=0)
-      #                 #
-      #                 # print('test1',test1)
-      #                 # print('test2',test2)
-      #             else:
-      #                 #print('not node',C_neighbor_memory_features[b, k])
-      #                 sub = C_neighbor_memory_features[b, k]
-      #
-      #                 if torch.all(sub == 0):
-      #                     pass
-      #                 else:
-      #                     print("非零元素:", sub[sub != 0])
-      #
-      #
-      #     # for b in range(len(source_nodes)):
-      #     #     source_node = source_nodes[b]
-      #     #     node_neighbors = neighbors[b]
-      #     #
-      #     #     for k, neighbor_node in enumerate(node_neighbors):
-      #     #             if neighbor_node in C_neighbor_message_to_memory_features:
-      #     #                 # 计算test1: message贡献 + old memory贡献
-      #     #                 message_contrib = C_neighbor_message_to_memory_features[neighbor_node].sum(dim=0)
-      #     #                 old_memory_contrib = C_neighbor_old_memory_to_memory_features[neighbor_node].sum(dim=0)
-      #     #                 test1 = message_contrib + old_memory_contrib
-      #     #                 # 计算test2: neighbor memory features的总和
-      #     #                 test2 = C_neighbor_memory_features[b, k].sum(dim=0)
-      #     #
-      #     #                 print('test1',test1)
-      #     #                 print('test2', test2)
-      #     #
-      #     #                 # 验证是否守恒
-      #     #                 if not torch.allclose(test1, test2, atol=1e-4):
-      #     #                     neighbor_memory_verify = False
-      #     #                     diff = torch.abs(test1 - test2).max().item()
-      #     #
-      #     #
-      #     # # 打印验证结果
-      #     # if neighbor_memory_verify:
-      #     #     print(f'邻居守恒验证结果: 通过 ✅')
-      #     # else:
-      #     #     print(f'邻居守恒验证结果: 失败 ❌')
-
-      total = None
-      for idx, mat in temporal_edge_contributions.items():
-          for _, second_mat in mat.items():
-              if total is None:
-                  total = second_mat.clone()
+              prev_source = downstream[depth][remaining_layers - 1]
+              if prev_source is None:
+                  downstream[depth][remaining_layers - 1] = source_to_top.clone()
               else:
-                  total = total + second_mat
+                  downstream[depth][remaining_layers - 1] = prev_source + source_to_top
 
-      # sum_dict = torch.stack(list(temporal_edge_contributions.values()), dim=0).sum(dim=0)  # [D_out]
+              flat_neighbor_to_top = neighbor_to_top.reshape(
+                  -1,
+                  neighbor_to_top.shape[2],
+                  neighbor_to_top.shape[3],
+              )
+              prev_neighbor = downstream[depth + 1][remaining_layers - 1]
+              if prev_neighbor is None:
+                  downstream[depth + 1][remaining_layers - 1] = flat_neighbor_to_top.clone()
+              else:
+                  downstream[depth + 1][remaining_layers - 1] = prev_neighbor + flat_neighbor_to_top
 
-      print('sum_dict', total.shape)
-
-      # 2) 原始三部分贡献矩阵分别对所有轴求和，再相加
-      sum_raw = C_neighbor_raw_features.sum(dim=(0, 1, 2))  # [D_out]
-      sum_time = C_edge_time_embeddings.sum(dim=(0, 1, 2))  # [D_out]
-      sum_feat = C_edge_features.sum(dim=(0, 1, 2))  # [D_out]
-      sum_raw_2 = C_raw_features.sum(dim=(0, 1))
-      sum_source = C_source_time.sum(dim=(0, 1))
-
-      sum_original = sum_raw + sum_time + sum_feat + sum_raw_2 + sum_source  # [D_out]
-
-      print('sum_original', sum_original.shape)
-
-      print('sum_original', sum_original)
-      print('sum_dict', total)
-
-      # 3) 守恒检查
-      check = torch.allclose(total, sum_original, atol=1e-4)
-      print("守恒验证:", "通过 ✅" if check else "失败 ❌")
-
-      return (h, C_memory_features,
-              C_neighbor_memory_features,
-              temporal_edge_contributions, neighbors, edge_idxs)
+      return (
+          final_embedding,
+          final_source_memory_features,
+          top_neighbor_memory_features,
+          temporal_edge_contributions,
+          top_neighbors,
+          top_edge_idxs,
+      )
 
   def compute_embedding_attention_without_contribution(self, memory, source_nodes, timestamps, n_layers, n_neighbors=20):
-      B = len(source_nodes)
-      # print('source nodes',source_nodes)
-      source_nodes_torch = torch.from_numpy(source_nodes).long().to(self.device)
-      timestamps_torch = torch.unsqueeze(torch.from_numpy(timestamps).float().to(self.device), dim=1)
+      assert n_layers >= 0
+      context = self._build_unrolled_context(source_nodes, timestamps, n_layers, n_neighbors)
+      embeddings, _, source_time_embeddings = self._initialize_unrolled_embeddings(memory, context)
 
-      raw_source_node_features = self.node_features[source_nodes_torch, :]  # [B, D_node]
+      for remaining_layers in range(1, n_layers + 1):
+          for depth in range(0, n_layers - remaining_layers + 1):
+              batch_size = len(context['nodes_per_depth'][depth])
+              edge_idxs_torch = torch.from_numpy(
+                  context['edge_idxs_per_depth'][depth]
+              ).long().to(self.device)
+              edge_deltas_torch = torch.from_numpy(
+                  context['edge_deltas_per_depth'][depth]
+              ).float().to(self.device)
+              mask = torch.from_numpy(context['masks_per_depth'][depth]).to(self.device)
 
-      print('raw_source_node_features', raw_source_node_features.shape)
+              embeddings[depth] = self.aggregate_without_contribution(
+                  remaining_layers,
+                  embeddings[depth],
+                  source_time_embeddings[depth],
+                  embeddings[depth + 1].view(batch_size, context['effective_n_neighbors'], -1),
+                  self.time_encoder(edge_deltas_torch),
+                  self.edge_features[edge_idxs_torch, :],
+                  mask,
+              )
 
-      # 最底层：静态特征 + memory（可选）
-      h = raw_source_node_features.clone()
-      if self.use_memory:
-          h = h + memory[source_nodes, :]
-
-      # 初始时间编码（始终为0，因为是 query 节点当前时间）
-      source_nodes_time_embedding = self.time_encoder(torch.zeros_like(timestamps_torch))  # [B, Dₜ]
-
-      # print('source_nodes_time_embedding',source_nodes_time_embedding)
-
-      for layer in range(n_layers):
-          # 采样邻居（每一层用当前 query 时间采样）
-          neighbors, edge_idxs, edge_times = self.neighbor_finder.get_temporal_neighbor(
-              source_nodes, timestamps, n_neighbors=n_neighbors
-          )
-
-          # print('neighbors',neighbors,neighbors.shape)
-          # print('edge_idxs',edge_idxs,edge_idxs.shape)
-          # print('edge_times',edge_times)
-
-          neighbors_torch = torch.from_numpy(neighbors).long().to(self.device)
-          # print('neighbors_torch',neighbors_torch)
-          edge_idxs_torch = torch.from_numpy(edge_idxs).long().to(self.device)
-          edge_deltas = timestamps[:, np.newaxis] - edge_times
-
-          # print('timestamps',timestamps)
-
-          # print('edge_deltas',edge_deltas,edge_deltas.shape)
-
-          edge_deltas_torch = torch.from_numpy(edge_deltas).float().to(self.device)
-
-          # 获取邻居嵌入（从上一层）
-          flat_neighbors = neighbors.flatten()
-          print('flat_neighbors ', len(flat_neighbors))
-          h_neighbors = self.node_features[flat_neighbors, :]
-          if self.use_memory:
-              h_neighbors = h_neighbors + memory[flat_neighbors, :]
-          print('h_neighbors ', h_neighbors.shape)
-
-          h_neighbors = h_neighbors.view(B, n_neighbors, -1)
-
-          print('h_neighbors', h_neighbors.shape)
-
-          # 时间编码与边特征
-          edge_time_embeddings = self.time_encoder(edge_deltas_torch)  # [B, N, Dₜ]
-          print('edge_time_embeddings', edge_time_embeddings.shape)
-          edge_features = self.edge_features[edge_idxs_torch, :]  # [B, N, Dₑ]
-          print('edge_features', edge_features.shape)
-          mask = neighbors_torch == 0  # [B, N]
-
-          # 聚合：本层嵌入 = f(hᶫ⁻¹, neighbors)
-          h, _ = self.aggregate_without_contribution(layer + 1, h,
-                                                                       source_nodes_time_embedding,
-                                                                       h_neighbors,
-                                                                       edge_time_embeddings,
-                                                                       edge_features,
-                                                                       mask)
-
-
-
-      return h
+      return embeddings[0]
 
   def map_contributions_to_temporal_edges_attention(self, C_raw_features, C_source_time, C_neighbor_raw_features,
                                           C_edge_time_embeddings,
@@ -2956,5 +2866,3 @@ def get_embedding_module(module_type, node_features, edge_features, memory, neig
                          n_neighbors=n_neighbors)
   else:
     raise ValueError("Embedding Module {} not supported".format(module_type))
-
-

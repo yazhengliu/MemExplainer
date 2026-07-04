@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import numpy as np
 
 from collections import defaultdict
 from copy import deepcopy
@@ -37,6 +38,28 @@ class Memory(nn.Module):
       self.messages[node].extend(node_id_to_messages[node])
 
   def get_memory(self, node_idxs):
+    if isinstance(node_idxs, torch.Tensor):
+      if node_idxs.numel() > 0:
+        node_min = int(node_idxs.min().item())
+        node_max = int(node_idxs.max().item())
+      else:
+        node_min = 0
+        node_max = -1
+    else:
+      node_idxs_np = np.asarray(node_idxs)
+      if node_idxs_np.size > 0:
+        node_min = int(node_idxs_np.min())
+        node_max = int(node_idxs_np.max())
+      else:
+        node_min = 0
+        node_max = -1
+
+    if node_min < 0 or node_max >= self.n_nodes:
+      raise IndexError(
+        f"Memory index out of range: min={node_min}, max={node_max}, "
+        f"memory_n_nodes={self.n_nodes}"
+      )
+
     return self.memory[node_idxs, :]
 
   def set_memory(self, node_idxs, values):

@@ -15,6 +15,8 @@ from modules.memory_updater import get_memory_updater, GRUMemoryUpdater, RNNMemo
 from modules.embedding_module import get_embedding_module
 from model.time_encoding import TimeEncode
 
+DEBUG_VERBOSE = False
+
 
 class TGN(torch.nn.Module):
   def __init__(self, neighbor_finder, node_features, edge_features, device, n_layers=2,
@@ -67,7 +69,8 @@ class TGN(torch.nn.Module):
 
     if self.use_memory:
       self.memory_dimension = memory_dimension
-      print('self.memory_dimension',self.memory_dimension)
+      if DEBUG_VERBOSE:
+        print('self.memory_dimension',self.memory_dimension)
       self.memory_update_at_start = memory_update_at_start
       raw_message_dimension = 2 * self.memory_dimension + self.n_edge_features + \
                               self.time_encoder.dimension
@@ -92,26 +95,25 @@ class TGN(torch.nn.Module):
 
     self.embedding_module_type = embedding_module_type
 
-    print('self.node_raw_features',self.node_raw_features.shape)
-    print('self.edge_raw_features', self.edge_raw_features.shape)
+    if DEBUG_VERBOSE:
+      print('self.node_raw_features',self.node_raw_features.shape)
+      print('self.edge_raw_features', self.edge_raw_features.shape)
 
     self.embedding_module = get_embedding_module(module_type=embedding_module_type,
-                                                 node_features=self.node_raw_features,
-                                                 edge_features=self.edge_raw_features,
-                                                 memory=self.memory,
-                                                 neighbor_finder=self.neighbor_finder,
-                                                 time_encoder=self.time_encoder,
-                                                 n_layers=self.n_layers,
-                                                 n_node_features=self.n_node_features,
-                                                 n_edge_features=self.n_edge_features,
-                                                 n_time_features=self.n_node_features,
-                                                 embedding_dimension=self.embedding_dimension,
-                                                 device=self.device,
-                                                 n_heads=n_heads, dropout=dropout,
-                                                 use_memory=use_memory,
-                                                 n_neighbors=self.n_neighbors)
-
-
+                                              node_features=self.node_raw_features,
+                                              edge_features=self.edge_raw_features,
+                                              memory=self.memory,
+                                              neighbor_finder=self.neighbor_finder,
+                                              time_encoder=self.time_encoder,
+                                              n_layers=self.n_layers,
+                                              n_node_features=self.n_node_features,
+                                              n_edge_features=self.n_edge_features,
+                                              n_time_features=self.n_node_features,
+                                              embedding_dimension=self.embedding_dimension,
+                                              device=self.device,
+                                              n_heads=n_heads, dropout=dropout,
+                                              use_memory=use_memory,
+                                              n_neighbors=self.n_neighbors)
     # MLP to compute probability on an edge given two node embeddings
     self.affinity_score = MergeLayer(self.n_node_features, self.n_node_features,
                                      self.n_node_features,
@@ -150,13 +152,11 @@ class TGN(torch.nn.Module):
         # Update memory for all nodes with messages stored in previous batches
 
         # print('self.memory.messages',type(self.memory.messages))
-        memory, last_update,C_message,C_memory,C_message_trace = self.get_updated_memory(list(range(self.n_nodes)),
+        memory, last_update, _, _, _ = self.get_updated_memory(list(range(self.n_nodes)),
                                                       self.memory.messages,message_dict,memory_dict,message_trace_dict)
       else:
         memory = self.memory.get_memory(list(range(self.n_nodes)))
         last_update = self.memory.last_update
-      # if len(C_message)>0:
-      #     print('C_message 0',C_message[1])
 
       ### Compute differences between the time the memory of a node was last updated,
       ### and the time for which we want to compute the embedding of a node
@@ -213,7 +213,6 @@ class TGN(torch.nn.Module):
             n_neighbors=n_neighbors,
         )
     elif self.embedding_module_type=='graph_attention':
-        print('graph_attention')
         node_embedding_iter, C_memory_features, \
             C_neighbor_memory_features, \
             temporal_edge_contributions, sample_neighbors, sample_neighbor_edgeidx = self.embedding_module.compute_embedding_attention(
@@ -228,15 +227,11 @@ class TGN(torch.nn.Module):
 
 
     # print(C_raw_features.shape)
-    print('C_memory_features.shape',C_memory_features.shape)
     # print('C_neighbor_raw_features',C_neighbor_raw_features.shape)
     # print(C_source_time.shape)
     # print(C_neighbor_embeddings.shape)
     # print(C_edge_time_embeddings.shape)
     # print(C_edge_features.shape)
-
-    print('node_embedding_iter',node_embedding_iter.shape)
-
 
     # total_contrib=C_raw_features.sum(dim=1)+C_memory_features.sum(dim=1)+C_source_time.sum(dim=1)+ \
     #               C_neighbor_raw_features.sum(dim=(1,2))+C_neighbor_memory_features.sum(dim=(1,2))+C_edge_time_embeddings.sum(dim=(1,2))\
@@ -245,50 +240,6 @@ class TGN(torch.nn.Module):
     # print('verify flag', torch.allclose(total_contrib, node_embedding_iter, atol=1e-4))
 
     node_embedding=node_embedding_iter
-
-    # C_message_to_memory_features=dict()
-    #
-    # C_old_memory_to_memory_features = dict()
-    #
-    # C_memory_features = C_memory_features.to(torch.float64)
-    #
-    # for i in range(len(nodes)):
-    #     if nodes[i] in C_message.keys():
-    #         if nodes[i] not in C_message_to_memory_features:
-    #             v = C_message[nodes[i]].to(dtype=C_memory_features.dtype, device=C_memory_features.device)
-    #             # print('v.shape',v.shape)
-    #             # print('C_memory_features[i]',C_memory_features[i].shape)
-    #             C_message_to_memory_features[nodes[i]]=v@C_memory_features[nodes[i]]
-    #
-    #     if nodes[i] in C_memory.keys():
-    #         if nodes[i] not in C_old_memory_to_memory_features:
-    #             u = C_memory[nodes[i]].to(dtype=C_memory_features.dtype, device=C_memory_features.device)
-    #             C_old_memory_to_memory_features[nodes[i]] = u @ C_memory_features[nodes[i]]
-    #
-    #     else:
-    #         pass
-    #         # print('yes',update_node)
-    #
-    # memory1_verify=True
-    #
-    # for i in range(len(nodes)):
-    #     if nodes[i] in C_message_to_memory_features:
-    #         test1=C_message_to_memory_features[nodes[i]].sum(dim=0)+C_old_memory_to_memory_features[nodes[i]].sum(dim=0)
-    #         test2=C_memory_features[nodes[i]].sum(dim=0)
-    #         if torch.allclose(test1, test2, atol=1e-4)==False:
-    #             memory1_verify=False
-    #         # print('memory1 verify', )
-    #         # print('test1',)
-    #         # print('test2',)
-    # print('memory1_verify',memory1_verify)
-
-
-
-
-
-
-
-
 
     # if torch.allclose(node_embedding, node_embedding_iter, atol=1e-6, rtol=1e-5):
     #     print("两个 embedding 在数值上近似相等")
@@ -314,7 +265,6 @@ class TGN(torch.nn.Module):
       if self.memory_update_at_start:
         # Persist the updates to the memory only for sources and destinations (since now we have
         # new messages for them)
-        print('positives',positives.shape)
         # for key,value in self.memory.messages.items():
         #     if len(value)!=0:
         #         print('key', key)
@@ -389,7 +339,7 @@ class TGN(torch.nn.Module):
 
 
     return source_node_embedding, destination_node_embedding, negative_node_embedding, C_memory_features,  \
-               C_neighbor_memory_features, temporal_edge_contributions,C_message,sample_neighbors,sample_neighbor_edgeidx
+               C_neighbor_memory_features, temporal_edge_contributions, sample_neighbors, sample_neighbor_edgeidx
 
 
   def compute_temporal_embeddings_without_contributions(self, source_nodes, destination_nodes, negative_nodes, edge_times,
@@ -449,7 +399,14 @@ class TGN(torch.nn.Module):
                              dim=0)
 
     if self.embedding_module_type == 'graph_sum':
-        node_embedding_iter = self.embedding_module.compute_embedding_iterative_without_contribution(
+        # node_embedding_iter = self.embedding_module.compute_embedding_iterative_without_contribution(
+        #     memory=memory,
+        #     source_nodes=nodes,
+        #     timestamps=timestamps,
+        #     n_layers=self.n_layers,
+        #     n_neighbors=n_neighbors,
+        # )
+        node_embedding_iter = self.embedding_module.compute_embedding_original(
             memory=memory,
             source_nodes=nodes,
             timestamps=timestamps,
@@ -458,7 +415,6 @@ class TGN(torch.nn.Module):
         )
 
     elif self.embedding_module_type=='graph_attention':
-        print('graph_attention')
         node_embedding_iter= self.embedding_module.compute_embedding_attention_without_contribution(
             memory=memory,
             source_nodes=nodes,
@@ -573,9 +529,10 @@ class TGN(torch.nn.Module):
     source_node_embedding, destination_node_embedding, negative_node_embedding = self.compute_temporal_embeddings_without_contributions(
       source_nodes, destination_nodes, negative_nodes, edge_times, edge_idxs, n_neighbors)
 
-    source_node_embedding = source_node_embedding.float()
-    destination_node_embedding = destination_node_embedding.float()
-    negative_node_embedding = negative_node_embedding.float()
+    score_dtype = next(self.affinity_score.parameters()).dtype
+    source_node_embedding = source_node_embedding.to(dtype=score_dtype)
+    destination_node_embedding = destination_node_embedding.to(dtype=score_dtype)
+    negative_node_embedding = negative_node_embedding.to(dtype=score_dtype)
 
     score = self.affinity_score(torch.cat([source_node_embedding, source_node_embedding], dim=0),
                                 torch.cat([destination_node_embedding,
@@ -615,6 +572,10 @@ class TGN(torch.nn.Module):
 
     if len(unique_nodes) > 0:
       unique_messages = self.message_function.compute_message(unique_messages) #mlp or identify
+      unique_messages = unique_messages.to(
+        dtype=self.memory.memory.dtype,
+        device=self.memory.memory.device,
+      )
 
     updated_memory, updated_last_update, message_dict,memory_dict,message_trace_dict = self.memory_updater.get_updated_memory(unique_nodes,
                                                                                                                       unique_messages,
@@ -634,6 +595,10 @@ class TGN(torch.nn.Module):
 
     if len(unique_nodes) > 0:
       unique_messages = self.message_function.compute_message(unique_messages) #mlp or identify
+      unique_messages = unique_messages.to(
+        dtype=self.memory.memory.dtype,
+        device=self.memory.memory.device,
+      )
 
     updated_memory, updated_last_update = self.memory_updater.get_updated_memory_without_contribution(unique_nodes,
                                                                                                                       unique_messages,
@@ -644,7 +609,17 @@ class TGN(torch.nn.Module):
 
   def get_raw_messages(self, source_nodes, source_node_embedding, destination_nodes,
                        destination_node_embedding, edge_times, edge_idxs,store_edge_info=False):
-    edge_times = torch.from_numpy(edge_times).float().to(self.device)
+    if len(edge_idxs) > 0:
+      edge_idx_min = int(np.min(edge_idxs))
+      edge_idx_max = int(np.max(edge_idxs))
+      if edge_idx_min < 0 or edge_idx_max >= self.edge_raw_features.shape[0]:
+        raise IndexError(
+          f"Edge index out of range: min={edge_idx_min}, max={edge_idx_max}, "
+          f"edge_feature_rows={self.edge_raw_features.shape[0]}"
+        )
+
+    message_dtype = self.memory.memory.dtype if self.use_memory else self.edge_raw_features.dtype
+    edge_times = torch.from_numpy(edge_times).to(device=self.device, dtype=message_dtype)
     edge_features = self.edge_raw_features[edge_idxs]
 
     source_memory = self.memory.get_memory(source_nodes) if not \
@@ -701,52 +676,6 @@ class TGN(torch.nn.Module):
 
   def set_neighbor_sampler(self, neighbor_finder):
       self.embedding_module.neighbor_sampler = neighbor_finder
-
-  def contrast(self, src_idx, tgt_idx, bgd_idx, cut_time, e_idx,
-               subgraph_src, subgraph_tgt, subgraph_bgd,
-               explain_weights=None, edge_attr=None):
-
-      if hasattr(self.embedding_module, 'atten_weights_list'):  # ! avoid cuda memory leakage
-          self.embedding_module.atten_weights_list = []
-
-      n_samples = len(src_idx)
-      source_node_embedding, destination_node_embedding, negative_node_embedding = \
-          self.get_node_emb(src_idx, tgt_idx, bgd_idx, cut_time, e_idx,
-                            subgraph_src, subgraph_tgt, subgraph_bgd, explain_weights, edge_attr)
-
-      source_node_embedding = source_node_embedding.float()
-      destination_node_embedding = destination_node_embedding.float()
-      negative_node_embedding = negative_node_embedding.float()
-
-      print('source_node_embedding',source_node_embedding.shape)
-      print('destination_node_embedding',destination_node_embedding.shape)
-      print('negative_node_embedding',negative_node_embedding.shape)
-
-      score = self.affinity_score(torch.cat([source_node_embedding, source_node_embedding], dim=0),
-                                  torch.cat([destination_node_embedding,
-                                             negative_node_embedding])).squeeze(dim=0)
-      pos_score = score[:n_samples]
-      neg_score = score[n_samples:]
-
-      return pos_score, neg_score
-
-  def contrast_node(self, src_idx, tgt_idx, bgd_idx, cut_time, e_idx,
-               subgraph_src, subgraph_tgt, subgraph_bgd,
-               explain_weights=None, edge_attr=None):
-
-      if hasattr(self.embedding_module, 'atten_weights_list'):  # ! avoid cuda memory leakage
-          self.embedding_module.atten_weights_list = []
-
-      n_samples = len(src_idx)
-      source_node_embedding, destination_node_embedding, negative_node_embedding = \
-          self.get_node_emb(src_idx, tgt_idx, bgd_idx, cut_time, e_idx,
-                            subgraph_src, subgraph_tgt, subgraph_bgd, explain_weights, edge_attr)
-
-      source_node_embedding = source_node_embedding.float()
-      destination_node_embedding = destination_node_embedding.float()
-      negative_node_embedding = negative_node_embedding.float()
-
-      return source_node_embedding
 
   def get_node_emb(self, src_idx, tgt_idx, bgd_idx, cut_time, e_idx,
                    subgraph_src, subgraph_tgt, subgraph_bgd, explain_weights=None, edge_attr=None):
@@ -847,65 +776,4 @@ class TGN(torch.nn.Module):
               self.update_memory(unique_destinations, destination_id_to_messages)
 
       return source_node_embedding, destination_node_embedding, negative_node_embedding
-
-  def get_prob(
-          self,
-          src_idx_l,
-          target_idx_l,
-          cut_time_l,
-          edge_idxs=None,
-          logit=False,
-          edge_idx_preserve_list=None,
-          candidate_weights_dict=None,
-  ):
-      """
-      src_idx_l, target_idx_l, cut_time_l: np.array
-      edge_idxs: actually can be None... Because in self.compute_temporal_embeddings(), we will skip self.get_raw_messages() function.
-      edge_idx_preserve_list: support for masking out some edges
-      candidate_weights_dict: support for pg explainer
-
-      """
-      if hasattr(
-              self.embedding_module, "atten_weights_list"
-      ):  # ! avoid cuda memory leakage
-          self.embedding_module.atten_weights_list = []
-
-      n_samples = len(src_idx_l)
-      negative_nodes = np.array(
-          [
-              0,
-          ]
-      )
-      edge_idxs = None
-      (
-          source_node_embedding,
-          destination_node_embedding,
-          negative_node_embedding,
-      ) = self.baseline_compute_temporal_embeddings(
-          src_idx_l,
-          target_idx_l,
-          negative_nodes,
-          cut_time_l,
-          edge_idxs,
-          self.n_neighbors,
-          edge_idx_preserve_list=edge_idx_preserve_list,
-          candidate_weights_dict=candidate_weights_dict,
-      )
-
-      score = self.affinity_score(
-          torch.cat([source_node_embedding, source_node_embedding], dim=0),
-          torch.cat([destination_node_embedding, negative_node_embedding]),
-      ).squeeze(dim=0)
-      pos_score = score[:n_samples]
-
-      if logit:
-          return pos_score
-      else:
-          return pos_score.sigmoid()
-
-
-
-
-
-
 

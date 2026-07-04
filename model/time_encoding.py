@@ -16,6 +16,10 @@ class TimeEncode(torch.nn.Module):
 
   def forward(self, t):
     # t has shape [batch_size, seq_len]
+    # Keep timestamp tensors aligned with the Linear layer after model dtype
+    # conversions such as tgn.to(dtype=torch.float64).
+    t = t.to(device=self.w.weight.device, dtype=self.w.weight.dtype)
+
     # Add dimension at the end to apply linear layer --> [batch_size, seq_len, 1]
     t = t.unsqueeze(dim=2)
 

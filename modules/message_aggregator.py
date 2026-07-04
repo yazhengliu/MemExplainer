@@ -67,10 +67,11 @@ class MeanMessageAggregator(MessageAggregator):
     super(MeanMessageAggregator, self).__init__(device)
 
   def aggregate(self, node_ids, messages):
-    """Only keep the last message for each node"""
+    """Average messages for each node and keep all source edge traces."""
     unique_node_ids = np.unique(node_ids)
     unique_messages = []
     unique_timestamps = []
+    edge_info_list = []
 
     to_update_node_ids = []
     n_messages = 0
@@ -81,11 +82,12 @@ class MeanMessageAggregator(MessageAggregator):
         to_update_node_ids.append(node_id)
         unique_messages.append(torch.mean(torch.stack([m[0] for m in messages[node_id]]), dim=0))
         unique_timestamps.append(messages[node_id][-1][1])
+        edge_info_list.append([m[2] for m in messages[node_id]])
 
     unique_messages = torch.stack(unique_messages) if len(to_update_node_ids) > 0 else []
     unique_timestamps = torch.stack(unique_timestamps) if len(to_update_node_ids) > 0 else []
 
-    return to_update_node_ids, unique_messages, unique_timestamps
+    return to_update_node_ids, unique_messages, unique_timestamps, edge_info_list
 
 
 def get_message_aggregator(aggregator_type, device):
