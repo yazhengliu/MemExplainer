@@ -15,8 +15,24 @@ python data_process/process_hmdb51.py
 
 
 ## 3. TGNs training
-### Pose-based action classification task
-To train the temporal graph neural networks, run the following command. Replace {data} with either **penn** or **hmdb**.
+### Link prediction task
+
+To train the temporal graph neural networks, run the following commands. Replace `{data}` with `uci`, `wikipedia`, `reddit`, or `enron`.
+
 ```bash
-python train_video.py --dataset {data}
+python train_link_prediction.py --config configs/train_link_prediction_{data}.json
+```
+
+### Node property prediction task
+
+To train the temporal graph neural networks, run the following commands. Replace `{data}` with `genre`, `reddit`, or `trade`.
+
+```bash
+python train_node_prediction.py --config configs/train_node_prediction_{data}.json
+```
+
+### Pose-based action classification task
+To train the temporal graph neural networks, run the following command. Replace `{data}` with `penn` or `hmdb`.
+```bash
+python train_video.py --config configs/train_video_{data}.json
 ```
