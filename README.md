@@ -167,6 +167,5 @@ python explain_video.py --config configs/explain_video_{data}.json
 </table>
 
 #### Memory Replay for Large Graphs
-For large link prediction datasets, tracing memory updates for all historical batches can be expensive. Therefore, we split the replay process into two stages. `--total_batch` specifies the total number of temporal batches used to update the model memory before explaining target edges. `--explain_epoch` specifies from which replay batch the memory-update tracing starts. Batches before `--explain_epoch` are only used to warm up the TGN memory, while batches from `--explain_epoch` to `--total_batch` are additionally tracked for memory backtracking and attribution.
-
+For large link prediction datasets, tracing all historical memory updates can be costly. To reduce overhead, replay is split into two stages. `--total_batch` sets the total number of temporal batches used to warm up model memory before explanation. `--explain_epoch` sets the batch from which memory-update tracing starts. Earlier batches only warm up TGN memory, while batches from `--explain_epoch` to `--total_batch` are also tracked for memory backtracking and attribution.
 
