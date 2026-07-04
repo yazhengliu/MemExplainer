@@ -20,6 +20,3 @@ To train the temporal graph neural networks, run the following command. Replace 
 ```bash
 python train_video.py --dataset {data}
 ```
-
-## 4. Explainability Algorithms
-The implementation of the explainability module is currently under preparation. We expect to release the source code and detailed instructions by July 5, 2026, after further code cleanup and validation.
