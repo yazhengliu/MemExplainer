@@ -1,34 +1,182 @@
 # MemExplainer
-We are currently cleaning the codebase and preparing documentation. 
+This is the Pytorch Implementation of [Towards the Explainability of Temporal Graph Networks via Memory
+Backtracking and Topological Attribution](https://openreview.net/forum?id=sKAgLgpujy&referrer=%5BAuthor%20Console%5D(%2Fgroup%3Fid%3DICML.cc%2F2026%2FConference%2FAuthors%23your-submissions))
+## 1. Data
 
-## 1. Dataset Download
-### Pose-based action classification task
-We train TGNs on pose-based action classification datasets, including Penn Action and HMDB51.
+The raw and processed datasets are available at [this](https://hkustgz-my.sharepoint.com/:f:/g/personal/yliu533_connect_hkust-gz_edu_cn/IgBLe4o3K1LyTLoyElSmrD3kAXIiYe-dZm3uWVWHvNs7Zqk?e=WbKWwL)
 
-- Penn Action: https://dreamdragon.github.io/PennAction/
-- HMDB51: https://serre-lab.clps.brown.edu/resource/hmdb-a-large-human-motion-database/
+If you want to rebuild human pose-based data from raw datasets, run:
 
-Please download the datasets from their official websites and place them under the `data` folder.
-
-## 2. Data Preprocessing
-
-To convert raw Penn Action frames and labels into temporal graph datasets, run:
 ```bash
 python data_process/penn_action_process.py
-```
-
-To convert raw HMDB51 data into temporal graph datasets, run:
-```bash
 python data_process/process_hmdb51.py
 ```
 
+## 2. TGNs training
+### Link prediction task
 
-## 3. TGNs training
-### Pose-based action classification task
-To train the temporal graph neural networks, run the following command. Replace {data} with either **penn** or **hmdb**.
+To train the temporal graph neural networks, run the following commands. Replace `{data}` with `uci`, `wikipedia`, `reddit`, or `enron`.
+
 ```bash
-python train_video.py --dataset {data}
+python train_link_prediction.py --config configs/train_link_prediction_{data}.json
 ```
 
-## 4. Explainability Algorithms
-The implementation of the explainability module is currently under preparation. We expect to release the source code and detailed instructions by July 5, 2026, after further code cleanup and validation.
+### Node property prediction task
+
+To train the temporal graph neural networks, run the following commands. Replace `{data}` with `genre`, `reddit`, or `trade`.
+
+```bash
+python train_node_prediction.py --config configs/train_node_prediction_{data}.json
+```
+
+### Pose-based action classification task
+To train the temporal graph neural networks, run the following command. Replace `{data}` with `penn` or `hmdb`.
+```bash
+python train_video.py --config configs/train_video_{data}.json
+```
+
+**TGN Training Parameters**
+
+<table>
+  <thead>
+    <tr>
+      <th width="220">Parameter</th>
+      <th>Description</th>
+      <th>Common values</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td nowrap><code>--embedding_module</code></td>
+      <td>Temporal embedding module used by TGN.</td>
+      <td><code>graph_sum</code>, <code>graph_attention</code>, <code>identity</code>, <code>time</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--aggregator</code></td>
+      <td>Aggregates messages for each node.</td>
+      <td><code>last</code>, <code>mean</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--message_function</code></td>
+      <td>Transforms raw messages before memory update.</td>
+      <td><code>identity</code>, <code>mlp</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--memory_updater</code></td>
+      <td>Updates node memory after receiving messages.</td>
+      <td><code>gru</code>, <code>rnn</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--use_memory</code></td>
+      <td>Enables TGN node memory.</td>
+      <td><code>true</code>, <code>false</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--n_layer</code></td>
+      <td>Number of temporal graph embedding layers.</td>
+      <td>Default value: 1</td>
+    </tr>
+    <tr>
+      <td nowrap><code>--n_head</code></td>
+      <td>Number of attention heads.</td>
+      <td>Default value: 2</td>
+    </tr>
+    <tr>
+      <td nowrap><code>--n_degree</code></td>
+      <td>Number of temporal neighbors sampled per node.</td>
+      <td>Default value: 10</td>
+    </tr>
+  </tbody>
+</table>
+
+## 3. TGNs explanation
+### Link prediction task
+
+To explain the temporal graph neural networks, run the following commands. Replace `{data}` with `uci`, `wikipedia`, `reddit`, or `enron`.
+
+```bash
+python explain_link_prediction.py --config configs/explain_link_prediction_{data}.json
+```
+
+### Node property prediction task
+
+To explain the temporal graph neural networks, run the following commands. Replace `{data}` with `genre`, `reddit`, or `trade`.
+
+```bash
+python explain_node_prediction.py --config configs/explain_node_prediction_{data}.json
+```
+
+### Pose-based action classification task
+To explain the temporal graph neural networks, run the following command. Replace `{data}` with `penn` or `hmdb`.
+```bash
+python explain_video.py --config configs/explain_video_{data}.json
+```
+
+**The current explanation algorithm supports TGN models trained with the following architecture settings**.
+
+| Parameter | Supported values |
+| --- | --- |
+| `--embedding_module` | `graph_attention`, `graph_sum` |
+| `--aggregator` | `last`, `mean` |
+| `--message_function` | `identity` |
+| `--memory_updater` | `gru`, `rnn` |
+| `--n_layer` | any positive integer |
+
+
+**Explanation Parameters**
+<table>
+  <thead>
+    <tr>
+      <th width="280">Parameter</th>
+      <th>Description</th>
+      <th>Common values</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td nowrap><code>--max_depth</code></td>
+      <td>Maximum depth of memory backtracking trees.</td>
+      <td>task dependent</td>
+    </tr>
+    <tr>
+      <td nowrap><code>--backtrace_child_prune_ratio</code></td>
+      <td>Ratio of backtracking children kept at each step. <code>1.0</code> keeps all children.</td>
+      <td><code>0.0</code>-<code>1.0</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--edge_selection_mode</code></td>
+      <td>Strategy for selecting explanatory edges.</td>
+      <td><code>ratio</code>, <code>given_number</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--select_edge_ratio</code></td>
+      <td>Edge selection ratios used when <code>edge_selection_mode=ratio</code>.</td>
+      <td>e.g. <code>0.1 0.2 0.3 0.4 0.5</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--given_select_numbers</code></td>
+      <td>Exact edge counts used when <code>edge_selection_mode=given_number</code>.</td>
+      <td>e.g. <code>1 2 3 4 5</code></td>
+    </tr>
+    <tr>
+      <td nowrap><code>--verbose_debug</code></td>
+      <td>Prints detailed attribution logs.</td>
+      <td><code>true</code>, <code>false</code></td>
+    </tr>
+  </tbody>
+</table>
+
+#### Memory Attributions for Large Graphs
+For large link prediction datasets, tracing all historical memory updates can be costly. To reduce overhead, replay is split into two stages. `--total_batch` sets the total number of temporal batches used to warm up model memory before explanation. `--explain_epoch` sets the batch from which memory-update tracing starts. Earlier batches only warm up TGN memory, while batches from `--explain_epoch` to `--total_batch` are also tracked for memory backtracking and attribution.
+
+## 4. Citation
+If you use this code in your research, please cite:
+```bash
+@article{MemExplainer,
+  title={Towards the Explainability of Temporal Graph Networks via Memory Backtracking and Topological Attribution},
+  author={Liu, Yazheng, Zhang, Xi, Xie, Sihong and Xiong, Hui},
+  conference={The Forty-Third International Conference on Machine Learning},
+  year={2026},
+}
+```
+
