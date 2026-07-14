@@ -1651,7 +1651,7 @@ if __name__ == "__main__":
 
 
         builder = TemporalGraphDataLoader(device=device)
-        tgn.neighbor_finder = builder.create_neighbor_finder(batches)
+        tgn.set_neighbor_finder(builder.create_neighbor_finder(batches))
 
         # current_edge_features = torch.from_numpy(
         #     video_global_edge_features[index_key].astype(np.float32)
